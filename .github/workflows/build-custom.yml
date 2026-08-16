@@ -1,0 +1,39 @@
+name: Build Feixiao Custom
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout Feixiao
+        uses: actions/checkout@v4
+        with:
+          ref: v1.0.2
+          submodules: recursive
+          path: Feixiao
+
+      - name: Clone rtw88-stable
+        run: |
+          git clone https://github.com/thegwchr/rtw88-stable.git
+
+      - name: Build Feixiao
+        working-directory: Feixiao
+        run: |
+          make clean || true
+          make all
+
+      - name: Package
+        run: |
+          mkdir -p Feixiao-Custom
+          cp -R Feixiao/build/out/rtw88.kext Feixiao-Custom/
+          cp Feixiao/build/out/rtw88ctl Feixiao-Custom/
+          ditto -c -k --sequesterRsrc --keepParent Feixiao-Custom Feixiao-Custom.zip
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-RTL8821CE-Custom
+          path: Feixiao-Custom.zip
