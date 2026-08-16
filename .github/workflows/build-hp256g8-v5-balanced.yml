@@ -1,0 +1,259 @@
+name: Build HP256G8 RTL8821CE v5 Balanced
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout upstream throughput base
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: fcc97df08eee15ac760eb020199cd12549e5955a
+          submodules: recursive
+          path: Feixiao
+          fetch-depth: 0
+
+      - name: Apply HP256G8 stability and 40MHz balance patch
+        working-directory: Feixiao
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          ieee = Path("src/kext/RTW88IEEE80211.cpp")
+          pci = Path("src/kext/RTW88PCIDevice.cpp")
+          compat = Path("src/compat/rtw88_compat.c")
+
+          c = ieee.read_text()
+          p = pci.read_text()
+          r = compat.read_text()
+
+          # Remove qualquer trava de 6 Mbps no 5 GHz
+          r = re.sub(
+              r'rtwdev->dm_info\.fix_rate\s*=\s*DESC_RATE6M\s*;',
+              'rtwdev->dm_info.fix_rate = 0xFF;',
+              r
+          )
+
+          # Nesta build priorizamos estabilidade:
+          # HT/VHT e agregação ficam ativos, mas limitamos a 40 MHz.
+          old80 = 'if (chip80 && vhtWidth == 1 && vhtSeg0 != 0) {'
+
+          if old80 not in c:
+              raise SystemExit("ERROR: VHT80 block not found")
+
+          c = c.replace(
+              old80,
+              'if (false && chip80 && vhtWidth == 1 && vhtSeg0 != 0) {',
+              1
+          )
+
+          marker = (
+              'IOLog("rtw88: connected chandef: %u MHz '
+              '(primary=%u cf1=%u)\\n",'
+          )
+
+          if marker in c:
+              c = c.replace(
+                  marker,
+                  'IOLog("rtw88: HP256G8 v5 balanced: max width 40 MHz\\n");\n'
+                  '    ' + marker,
+                  1
+              )
+
+          # Mantém mais espaço livre no ring TX
+          p = p.replace(
+              'static constexpr unsigned int kRTW88TxStallAvail = 96;',
+              'static constexpr unsigned int kRTW88TxStallAvail = 128;'
+          )
+
+          p = p.replace(
+              'static constexpr unsigned int kRTW88TxResumeAvail = 160;',
+              'static constexpr unsigned int kRTW88TxResumeAvail = 192;'
+          )
+
+          # Desliga PCIe ASPM L0s/L1
+          start_block = """    /* Enable bus mastering & memory space */
+              _pciDev->setBusMasterEnable(true);
+              _pciDev->setMemoryEnable(true);
+          """
+
+          patched_block = """    /* Enable bus mastering & memory space */
+              _pciDev->setBusMasterEnable(true);
+              _pciDev->setMemoryEnable(true);
+
+              /* HP256G8 RTL8821CE: disable PCIe ASPM L0s/L1. */
+              {
+                  int pcieCap = pciFindCapability(0x10);
+
+                  if (pcieCap) {
+                      UInt16 linkCtl =
+                          pciReadWord(pcieCap + 0x10);
+
+                      UInt16 newLinkCtl =
+                          (UInt16)(linkCtl & ~0x0003);
+
+                      if (newLinkCtl != linkCtl)
+                          pciWriteWord(
+                              pcieCap + 0x10,
+                              newLinkCtl
+                          );
+
+                      IOLog(
+                          "rtw88: HP256G8 v5 ASPM off "
+                          "linkctl=0x%04x->0x%04x\\n",
+                          linkCtl,
+                          newLinkCtl
+                      );
+                  }
+
+                  _pciDev->setMemoryEnable(true);
+                  _pciDev->setBusMasterEnable(true);
+              }
+          """
+
+          if "HP256G8 v5 ASPM off" not in p:
+              if start_block not in p:
+                  raise SystemExit(
+                      "ERROR: PCI start block not found"
+                  )
+
+              p = p.replace(
+                  start_block,
+                  patched_block,
+                  1
+              )
+
+          ieee.write_text(c)
+          pci.write_text(p)
+          compat.write_text(r)
+
+          print("HP256G8 v5 balanced patch applied")
+          PY
+
+          echo "===== VERIFY ====="
+
+          grep -n \
+            "HP256G8 v5 balanced" \
+            src/kext/RTW88IEEE80211.cpp
+
+          grep -n \
+            "HP256G8 v5 ASPM off" \
+            src/kext/RTW88PCIDevice.cpp
+
+          grep -n \
+            "kRTW88TxStallAvail" \
+            src/kext/RTW88PCIDevice.cpp
+
+          grep -n \
+            "kRTW88TxResumeAvail" \
+            src/kext/RTW88PCIDevice.cpp
+
+          grep -n \
+            "fix_rate = 0xFF" \
+            src/compat/rtw88_compat.c | head
+
+      - name: Clone rtw88-stable
+        run: |
+          git clone \
+            --depth 1 \
+            https://github.com/thegwchr/rtw88-stable.git
+
+      - name: Download firmware
+        run: |
+          cd Feixiao/firmware
+
+          for fw in \
+            rtw8822b_fw.bin \
+            rtw8822c_fw.bin \
+            rtw8821c_fw.bin \
+            rtw8821a_fw.bin \
+            rtw8812a_fw.bin \
+            rtw8814a_fw.bin
+          do
+            if [ ! -s "$fw" ]; then
+              curl \
+                -L \
+                --fail \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
+                -o "$fw"
+            fi
+          done
+
+      - name: Build
+        working-directory: Feixiao
+        run: |
+          make clean || true
+          make all
+
+      - name: Verify output
+        run: |
+          test -d Feixiao/build/out/rtw88.kext
+          test -f Feixiao/build/out/rtw88ctl
+
+          file \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88
+
+          strings \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+            | grep "HP256G8 v5" \
+            || true
+
+      - name: Package
+        run: |
+          OUT="${{ runner.temp }}/Feixiao-HP256G8-v5-Balanced"
+
+          mkdir -p "$OUT"
+
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "$OUT/"
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "$OUT/"
+
+          chmod +x \
+            "$OUT/rtw88ctl"
+
+          cat > "$OUT/BUILD-INFO.txt" <<'EOF'
+          Feixiao HP 256 G8 / RTL8821CE - v5 Balanced
+
+          Base:
+          upstream fcc97df
+
+          Changes:
+          - HT/VHT enabled
+          - A-MPDU/A-MSDU enabled
+          - firmware rate adaptation enabled
+          - no fixed 6 Mbps rate on 5 GHz
+          - maximum channel width: 40 MHz
+          - earlier TX ring backpressure
+          - PCIe ASPM L0s/L1 disabled
+          - PCI Bus Master enabled
+          - PCI Memory Space enabled
+
+          Goal:
+          stable sustained 5 GHz traffic
+          target >100 Mbps if AP/PHY allows
+
+          Keep your known-working v1.0.2 backup.
+          EOF
+
+          cd "${{ runner.temp }}"
+
+          zip \
+            -r \
+            Feixiao_HP256G8_v5_Balanced.zip \
+            Feixiao-HP256G8-v5-Balanced
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-HP256G8-v5-Balanced
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v5_Balanced.zip
+          retention-days: 7
