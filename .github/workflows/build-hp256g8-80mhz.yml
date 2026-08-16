@@ -1,0 +1,60 @@
+name: Build HP256G8 80MHz Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Feixiao v1.0.2
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: v1.0.2
+          submodules: recursive
+          path: Feixiao
+          fetch-depth: 0
+
+      - name: Apply 40/80 MHz patch
+        working-directory: Feixiao
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git cherry-pick fcc97df
+
+      - name: Clone rtw88-stable
+        run: |
+          git clone --depth 1 https://github.com/thegwchr/rtw88-stable.git
+
+      - name: Download firmware
+        run: |
+          cd Feixiao/firmware
+          for fw in rtw8822b_fw.bin rtw8822c_fw.bin rtw8821c_fw.bin \
+                    rtw8821a_fw.bin rtw8812a_fw.bin rtw8814a_fw.bin; do
+            if [ ! -s "$fw" ]; then
+              curl -sLO "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw"
+            fi
+          done
+
+      - name: Build
+        working-directory: Feixiao
+        run: |
+          make all
+
+      - name: Show commit
+        working-directory: Feixiao
+        run: |
+          git log -3 --oneline
+
+      - name: Package
+        run: |
+          cd Feixiao/build/out
+          zip -r "${{ runner.temp }}/Feixiao_HP256G8_80MHz_Test.zip" rtw88.kext rtw88ctl
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-HP256G8-80MHz-Test
+          path: ${{ runner.temp }}/Feixiao_HP256G8_80MHz_Test.zip
