@@ -1,4 +1,4 @@
-name: Build HP256G8 80MHz Test v3
+name: Build HP256G8 DMA Stability v4
 
 on:
   workflow_dispatch:
@@ -17,301 +17,206 @@ jobs:
           path: Feixiao
           fetch-depth: 0
 
-      - name: Apply HP256G8 40/80 MHz patch v3
+      - name: Apply HP256G8 PCI DMA stability patch
         working-directory: Feixiao
         run: |
           python3 <<'PY'
           from pathlib import Path
           import re
 
-          cpp = Path("src/kext/RTW88IEEE80211.cpp")
-          hpp = Path("src/kext/RTW88IEEE80211.hpp")
+          root = Path(".")
 
-          c = cpp.read_text()
-          h = hpp.read_text()
+          candidates = [
+              Path("src/kext/RTW88PCIDevice.cpp"),
+              Path("src/kext/RTW88IEEE80211.cpp"),
+              Path("src/compat/rtw88_compat.c"),
+              Path("src/compat/rtw88_compat.h"),
+          ]
 
-          # --------------------------------------------------
-          # 1. Declare setConnectedChandef()
-          # --------------------------------------------------
+          print("=== Searching PCIe / ASPM related code ===")
 
-          if "setConnectedChandef" not in h:
-              pattern = r'(\s*void\s+restoreConnectedChannel\s*\(\s*\)\s*;)'
+          for p in candidates:
+              if not p.exists():
+                  continue
 
-              if not re.search(pattern, h):
-                  raise SystemExit(
-                      "ERROR: restoreConnectedChannel declaration not found"
-                  )
+              text = p.read_text(errors="ignore")
 
-              h = re.sub(
-                  pattern,
-                  r'\1\n'
-                  r'    void      setConnectedChandef('
-                  r'struct ieee80211_channel *chan);',
-                  h,
-                  count=1
-              )
+              hits = []
 
-          # --------------------------------------------------
-          # 2. Add channel-width state next to _txSeq
-          # --------------------------------------------------
+              for kw in [
+                  "ASPM",
+                  "aspm",
+                  "L1",
+                  "L0s",
+                  "power",
+                  "pci",
+                  "PCI",
+              ]:
+                  if kw in text:
+                      hits.append(kw)
 
-          if "_connChanWidth" not in h:
-              pattern = r'(\s*uint16_t\s+_txSeq\s*=\s*0\s*;)'
+              if hits:
+                  print(p, hits)
 
-              if not re.search(pattern, h):
-                  raise SystemExit(
-                      "ERROR: _txSeq declaration not found"
-                  )
+          #
+          # Patch RTW88PCIDevice.cpp if present.
+          #
+          pci = Path("src/kext/RTW88PCIDevice.cpp")
 
-              h = re.sub(
-                  pattern,
-                  r'\n    uint32_t _connChanWidth = 20;'
-                  r'\1',
-                  h,
-                  count=1
-              )
-
-          # --------------------------------------------------
-          # 3. Insert channel negotiation function
-          # --------------------------------------------------
-
-          insert_pattern = (
-              r'void\s+RTW88IEEE80211::'
-              r'restoreConnectedChannel\s*\(\s*\)'
-          )
-
-          match = re.search(insert_pattern, c)
-
-          if not match:
+          if not pci.exists():
               raise SystemExit(
-                  "ERROR: restoreConnectedChannel implementation not found"
+                  "ERROR: RTW88PCIDevice.cpp not found"
               )
 
-          if "RTW88IEEE80211::setConnectedChandef" not in c:
+          c = pci.read_text()
 
-              func = r'''
-          void RTW88IEEE80211::setConnectedChandef(
-              struct ieee80211_channel *chan)
+          #
+          # Inject helper that forces PCI command/state awake.
+          #
+          if "hp256g8ForcePCIActive" not in c:
+
+              insert = c.find(
+                  "OSDefineMetaClassAndStructors"
+              )
+
+              if insert == -1:
+                  raise SystemExit(
+                      "ERROR: could not find insertion point"
+                  )
+
+              helper = r'''
+          static void hp256g8ForcePCIActive(IOPCIDevice *dev)
           {
-              if (!chan || !_hw || !_hw->wiphy)
+              if (!dev)
                   return;
 
               /*
-               * Preserve v1.0.2 behaviour as safe fallback.
+               * Keep the RTL8821CE awake and bus-mastering.
+               *
+               * This is intentionally conservative:
+               * - enable memory access
+               * - enable bus mastering
+               * - avoid transitioning the device into a
+               *   low-power PCI state while the driver is active
                */
-              _hw->conf.chandef.chan = chan;
-              _hw->conf.chandef.width =
-                  NL80211_CHAN_WIDTH_20_NOHT;
-              _hw->conf.chandef.center_freq1 =
-                  chan->center_freq;
 
-              _connChanWidth = 20;
+              dev->setMemoryEnable(true);
+              dev->setBusMasterEnable(true);
 
-              enum nl80211_band band =
-                  (_targetBSS.channel > 14)
-                      ? NL80211_BAND_5GHZ
-                      : NL80211_BAND_2GHZ;
+              dev->enablePCIPowerManagement(
+                  kPCIPMCPMESupportFromD0
+              );
 
-              struct ieee80211_supported_band *sband =
-                  _hw->wiphy->bands[band];
-
-              if (!sband) {
-                  IOLog(
-                      "rtw88: HP256G8 no band; using 20 MHz\n"
-                  );
-                  return;
-              }
-
-              bool can40 =
-                  (sband->ht_cap.cap &
-                   IEEE80211_HT_CAP_SUP_WIDTH_20_40) != 0;
-
-              bool can80 =
-                  can40 &&
-                  band == NL80211_BAND_5GHZ &&
-                  sband->vht_cap.vht_supported;
-
-              int secondaryOffset = 0;
-              bool apAllows40 = false;
-
-              int vhtWidth = 0;
-              uint8_t vhtCenterSeg0 = 0;
-
-              const uint8_t *ies = _targetBSS.ies;
-              uint16_t iesLen = _targetBSS.ies_len;
-
-              /*
-               * Parse HT Operation and VHT Operation
-               * from the target AP.
-               */
-              for (uint16_t i = 0; i + 2 <= iesLen;) {
-
-                  uint8_t id = ies[i];
-                  uint8_t len = ies[i + 1];
-
-                  if (
-                      (uint32_t)i + 2U + (uint32_t)len >
-                      (uint32_t)iesLen
-                  )
-                      break;
-
-                  const uint8_t *data = ies + i + 2;
-
-                  if (
-                      id == WLAN_EID_HT_OPERATION &&
-                      len >= 2
-                  ) {
-                      secondaryOffset =
-                          data[1] & 0x03;
-
-                      apAllows40 =
-                          (data[1] & 0x04) != 0;
-                  }
-
-                  else if (
-                      id == WLAN_EID_VHT_OPERATION &&
-                      len >= 3
-                  ) {
-                      vhtWidth = data[0];
-                      vhtCenterSeg0 = data[1];
-                  }
-
-                  i += 2 + len;
-              }
-
-              /*
-               * HT40
-               */
-              if (
-                  can40 &&
-                  apAllows40 &&
-                  (
-                      secondaryOffset == 1 ||
-                      secondaryOffset == 3
-                  )
-              ) {
-                  _connChanWidth = 40;
-
-                  _hw->conf.chandef.width =
-                      NL80211_CHAN_WIDTH_40;
-
-                  _hw->conf.chandef.center_freq1 =
-                      (uint32_t)(
-                          (int)chan->center_freq +
-                          (
-                              secondaryOffset == 1
-                                  ? 10
-                                  : -10
-                          )
-                      );
-              }
-
-              /*
-               * VHT80
-               */
-              if (
-                  can80 &&
-                  vhtWidth == 1 &&
-                  vhtCenterSeg0 != 0
-              ) {
-                  _connChanWidth = 80;
-
-                  _hw->conf.chandef.width =
-                      NL80211_CHAN_WIDTH_80;
-
-                  _hw->conf.chandef.center_freq1 =
-                      (uint32_t)(
-                          5000 +
-                          5 * vhtCenterSeg0
-                      );
-              }
+              dev->setPowerState(
+                  1,
+                  dev
+              );
 
               IOLog(
-                  "rtw88: HP256G8 chandef "
-                  "%u MHz primary=%u center=%u "
-                  "can40=%d can80=%d\n",
-                  _connChanWidth,
-                  chan->center_freq,
-                  _hw->conf.chandef.center_freq1,
-                  can40 ? 1 : 0,
-                  can80 ? 1 : 0
+                  "rtw88: HP256G8 PCI active state forced\n"
               );
           }
 
           '''
 
-              c = (
-                  c[:match.start()] +
-                  func +
-                  c[match.start():]
+              c = c[:insert] + helper + c[insert:]
+
+          #
+          # Find calls where PCI device is enabled/opened.
+          # Add our helper immediately afterwards.
+          #
+          patterns = [
+              (
+                  r'(_pcidev->setMemoryEnable\s*\(\s*true\s*\)\s*;)',
+                  r'\1\n    hp256g8ForcePCIActive(_pcidev);'
+              ),
+              (
+                  r'(_pcidev->setBusMasterEnable\s*\(\s*true\s*\)\s*;)',
+                  r'\1\n    hp256g8ForcePCIActive(_pcidev);'
+              ),
+          ]
+
+          modifications = 0
+
+          for pattern, repl in patterns:
+              newc, count = re.subn(
+                  pattern,
+                  repl,
+                  c,
+                  count=1
               )
 
-          # --------------------------------------------------
-          # 4. Replace v1.0.2 fixed-20MHz configuration
-          # --------------------------------------------------
+              if count:
+                  c = newc
+                  modifications += count
+                  break
 
-          fixed20 = re.compile(
-              r'_hw->conf\.chandef\.chan\s*=\s*chan\s*;\s*'
-              r'_hw->conf\.chandef\.width\s*=\s*'
-              r'NL80211_CHAN_WIDTH_20_NOHT\s*;\s*'
-              r'_hw->conf\.chandef\.center_freq1\s*=\s*'
-              r'chan->center_freq\s*;'
-          )
+          #
+          # If neither call exists, insert after probe/open path.
+          #
+          if modifications == 0:
+              probes = [
+                  r'(rtw_pci_probe\s*\([^;]+;)',
+                  r'(_pcidev->open\s*\([^;]+;)',
+              ]
 
-          # Do not replace the fallback inside our new function.
-          # Split around the function and patch only original code.
+              for pattern in probes:
+                  m = re.search(pattern, c)
 
-          func_start = c.find(
-              "void RTW88IEEE80211::setConnectedChandef"
-          )
+                  if m:
+                      pos = m.end()
 
-          restore_start = c.find(
-              "void RTW88IEEE80211::restoreConnectedChannel"
-          )
+                      c = (
+                          c[:pos] +
+                          "\n    hp256g8ForcePCIActive(_pcidev);" +
+                          c[pos:]
+                      )
 
-          before = c[:func_start]
-          custom = c[func_start:restore_start]
-          after = c[restore_start:]
+                      modifications += 1
+                      break
 
-          after, replacements = fixed20.subn(
-              "setConnectedChandef(chan);",
-              after
-          )
-
-          c = before + custom + after
-
-          hpp.write_text(h)
-          cpp.write_text(c)
-
-          print("====================================")
-          print("HP256G8 40/80 MHz PATCH V3 APPLIED")
-          print("====================================")
-          print("Fixed 20MHz blocks replaced:", replacements)
-
-          if replacements == 0:
-              print(
-                  "WARNING: no original 20 MHz block replaced"
+          if modifications == 0:
+              raise SystemExit(
+                  "ERROR: could not find PCI init path"
               )
+
+          pci.write_text(c)
+
+          print("PCI initialization patched:", modifications)
+
+          #
+          # Add extra timeout diagnostics.
+          #
+          compat = Path("src/compat/rtw88_compat.c")
+
+          if compat.exists():
+              x = compat.read_text()
+
+              needle = "pci bus timeout, check dma status"
+
+              if needle in x and "HP256G8 DMA timeout" not in x:
+                  x = x.replace(
+                      needle,
+                      "HP256G8 DMA timeout - pci bus timeout, check dma status"
+                  )
+
+                  compat.write_text(x)
+
+                  print("DMA timeout diagnostic marker added")
+
+          print("=== HP256G8 DMA stability patch applied ===")
           PY
 
           echo
-          echo "===== HEADER VERIFY ====="
-          grep -n "restoreConnectedChannel" \
-            src/kext/RTW88IEEE80211.hpp
+          echo "===== VERIFY PCI PATCH ====="
 
-          grep -n "setConnectedChandef" \
-            src/kext/RTW88IEEE80211.hpp
+          grep -n \
+            "HP256G8 PCI active" \
+            src/kext/RTW88PCIDevice.cpp
 
-          grep -n "_connChanWidth" \
-            src/kext/RTW88IEEE80211.hpp
-
-          echo
-          echo "===== CPP VERIFY ====="
-          grep -n "HP256G8 chandef" \
-            src/kext/RTW88IEEE80211.cpp
-
-          grep -n "setConnectedChandef" \
-            src/kext/RTW88IEEE80211.cpp
+          grep -n \
+            "hp256g8ForcePCIActive" \
+            src/kext/RTW88PCIDevice.cpp
 
       - name: Clone rtw88-stable
         run: |
@@ -332,39 +237,66 @@ jobs:
             rtw8814a_fw.bin
           do
             if [ ! -s "$fw" ]; then
+
+              echo "Downloading $fw"
+
               curl \
                 -L \
                 --fail \
                 "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
                 -o "$fw"
+
             fi
           done
 
       - name: Show build environment
         run: |
+          echo "===== macOS ====="
           sw_vers
+
+          echo
+          echo "===== Xcode ====="
           xcodebuild -version
+
+          echo
+          echo "===== Clang ====="
           clang --version
 
-      - name: Build custom Feixiao
+      - name: Build HP256G8 DMA Stability
         working-directory: Feixiao
         run: |
           make clean || true
+
+          echo
+          echo "===================================="
+          echo "BUILDING HP256G8 DMA STABILITY V4"
+          echo "===================================="
+
           make all
 
-      - name: Verify build output
+      - name: Verify output
         run: |
-          find Feixiao/build/out -maxdepth 3 -print
+          echo "===== Build output ====="
 
-          test -d Feixiao/build/out/rtw88.kext
-          test -f Feixiao/build/out/rtw88ctl
+          find \
+            Feixiao/build/out \
+            -maxdepth 3 \
+            -print
+
+          test \
+            -d \
+            Feixiao/build/out/rtw88.kext
+
+          test \
+            -f \
+            Feixiao/build/out/rtw88ctl
 
           echo "rtw88.kext OK"
           echo "rtw88ctl OK"
 
-      - name: Package HP256G8 build
+      - name: Package HP256G8 DMA build
         run: |
-          OUT="${{ runner.temp }}/Feixiao-HP256G8-80MHz-v3"
+          OUT="${{ runner.temp }}/Feixiao-HP256G8-DMA-v4"
 
           mkdir -p "$OUT"
 
@@ -384,23 +316,36 @@ jobs:
           Base:
           Feixiao v1.0.2
 
-          Experimental changes:
-          - preserve stable v1.0.2 connection path
-          - HT 40 MHz negotiation
-          - VHT 80 MHz negotiation on 5 GHz
+          Goal:
+          PCIe / DMA stability
+
+          Changes:
+          - no HT40/VHT80 experimental patch
           - no newer A-MPDU/A-MSDU changes
+          - force PCI device memory access enabled
+          - force PCI bus mastering enabled
+          - attempt to keep PCI device in active state
+          - additional PCI/DMA diagnostic marker
+
+          Target problem:
+          repeated:
+          pci bus timeout, check dma status
+
+          IMPORTANT:
+          Experimental build.
+          Keep working v1.0.2 backup.
           EOF
 
           cd "${{ runner.temp }}"
 
           zip \
             -r \
-            Feixiao_HP256G8_80MHz_v3.zip \
-            Feixiao-HP256G8-80MHz-v3
+            Feixiao_HP256G8_DMA_v4.zip \
+            Feixiao-HP256G8-DMA-v4
 
-      - name: Upload HP256G8 custom driver
+      - name: Upload HP256G8 DMA driver
         uses: actions/upload-artifact@v4
         with:
-          name: Feixiao-HP256G8-80MHz-v3
-          path: ${{ runner.temp }}/Feixiao_HP256G8_80MHz_v3.zip
+          name: Feixiao-HP256G8-DMA-v4
+          path: ${{ runner.temp }}/Feixiao_HP256G8_DMA_v4.zip
           retention-days: 7
