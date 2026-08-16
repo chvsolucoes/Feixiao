@@ -718,196 +718,380 @@ jobs:
                   1
               )
 
-          print("macOS RX batching: OK")
+          print("macOS RX batching: OK")# ============================================================
+# 15. RTW88 RX DMA COMPLETION-TAG RECOVERY
+#
+# IMPORTANT:
+#
+# Do NOT match the entire function using whitespace.
+#
+# Locate:
+#
+# START:
+# static void rtw_pci_dma_check(
+#
+# END:
+# static u32 __pci_get_hw_tx_ring_rp(
+#
+# This makes the patch independent of tabs,
+# spaces and source formatting.
+# ============================================================
 
-          # ============================================================
-          # 15. RTW88 RX DMA COMPLETION-TAG RECOVERY
-          #
-          # The original function immediately reads:
-          #
-          #     total_pkt_size
-          #
-          # and compares it against:
-          #
-          #     rtwpci->rx_tag
-          #
-          # A mismatch prints:
-          #
-          #     pci bus timeout, check dma status
-          #
-          #
-          # v8:
-          #
-          # 1. waits up to 200 us for DMA descriptor visibility;
-          #
-          # 2. if it remains mismatched, synchronize the expected
-          #    sequence with the hardware-observed completion tag;
-          #
-          # 3. warning is rate limited so one offset cannot flood
-          #    dmesg for every packet.
-          # ============================================================
+if (
+    "HP256G8 v8 RX tag resync"
+    not in lp
+):
 
-          old_dma_check = """static void rtw_pci_dma_check(struct rtw_dev *rtwdev,
-                                      struct rtw_pci_rx_ring *rx_ring,
-                                      u32 idx)
-          {
-              struct rtw_pci *rtwpci = (struct rtw_pci *)rtwdev->priv;
-              const struct rtw_chip_info *chip = rtwdev->chip;
-              struct rtw_pci_rx_buffer_desc *buf_desc;
-              u32 desc_sz = chip->rx_buf_desc_sz;
-              u16 total_pkt_size;
+    dma_start_anchor = (
+        "static void rtw_pci_dma_check("
+    )
 
-              buf_desc = (struct rtw_pci_rx_buffer_desc *)(rx_ring->r.head +
-                                                           idx * desc_sz);
-              total_pkt_size = le16_to_cpu(buf_desc->total_pkt_size);
+    dma_end_anchor = (
+        "static u32 __pci_get_hw_tx_ring_rp("
+    )
 
-              /* rx tag mismatch, throw a warning */
-              if (total_pkt_size != rtwpci->rx_tag)
-                  rtw_warn(rtwdev, "pci bus timeout, check dma status\\n");
 
-              rtwpci->rx_tag = (rtwpci->rx_tag + 1) % RX_TAG_MAX;
-          }"""
+    dma_start = lp.find(
+        dma_start_anchor
+    )
 
-          new_dma_check = """static void rtw_pci_dma_check(struct rtw_dev *rtwdev,
-                                      struct rtw_pci_rx_ring *rx_ring,
-                                      u32 idx)
-          {
-              struct rtw_pci *rtwpci =
-                  (struct rtw_pci *)rtwdev->priv;
 
-              const struct rtw_chip_info *chip =
-                  rtwdev->chip;
+    if (
+        dma_start < 0
+    ):
 
-              struct rtw_pci_rx_buffer_desc *buf_desc;
+        raise SystemExit(
+            "ERROR: rtw_pci_dma_check "
+            "function start not found"
+        )
 
-              u32 desc_sz =
-                  chip->rx_buf_desc_sz;
 
-              u16 total_pkt_size = 0;
-              u16 expected = rtwpci->rx_tag;
+    dma_end = lp.find(
+        dma_end_anchor,
+        dma_start
+    )
 
-              int i;
 
-              static u32 mismatch_count;
+    if (
+        dma_end < 0
+    ):
 
-              buf_desc =
-                  (struct rtw_pci_rx_buffer_desc *)
-                  (
-                      rx_ring->r.head
-                      +
-                      idx * desc_sz
-                  );
+        raise SystemExit(
+            "ERROR: function after "
+            "rtw_pci_dma_check not found"
+        )
 
-              /*
-               * HP256G8 v8 DMA recovery.
-               *
-               * RX WP can become visible before the
-               * coherent descriptor completion tag.
-               *
-               * Wait for the expected tag before
-               * consuming the descriptor.
-               *
-               * 100 x 2 us = maximum 200 us.
-               */
 
-              for (
-                  i = 0;
-                  i < 100;
-                  i++
-              ) {
+    old_dma_function = lp[
+        dma_start:dma_end
+    ]
 
-                  total_pkt_size =
-                      le16_to_cpu(
-                          READ_ONCE(
-                              buf_desc->total_pkt_size
-                          )
-                      );
 
-                  if (
-                      total_pkt_size ==
-                      expected
-                  )
-                      break;
+    # Make sure we selected the correct function.
 
-                  udelay(
-                      2
-                  );
-              }
+    if (
+        "pci bus timeout, check dma status"
+        not in old_dma_function
+    ):
 
-              if (
-                  total_pkt_size !=
-                  expected
-              ) {
+        raise SystemExit(
+            "ERROR: selected DMA function "
+            "does not contain timeout check"
+        )
 
-                  /*
-                   * If one tag is missed, simply incrementing
-                   * the old expected value keeps host/device
-                   * permanently out of phase.
-                   *
-                   * Rebase the expected sequence on the tag
-                   * actually completed by hardware.
-                   */
 
-                  mismatch_count++;
+    if (
+        "rtwpci->rx_tag"
+        not in old_dma_function
+    ):
 
-                  if (
-                      mismatch_count == 1
-                      ||
-                      (
-                          mismatch_count
-                          &
-                          0xff
-                      )
-                      ==
-                      0
-                  ) {
+        raise SystemExit(
+            "ERROR: selected DMA function "
+            "does not contain rx_tag"
+        )
 
-                      rtw_warn(
-                          rtwdev,
 
-                          "HP256G8 v8 RX tag resync "
-                          "expected=%u observed=%u count=%u\\n",
+    print(
+        "Original rtw_pci_dma_check located: OK"
+    )
 
-                          expected,
-                          total_pkt_size,
-                          mismatch_count
-                      );
-                  }
 
-                  rtwpci->rx_tag =
-                      total_pkt_size;
-              }
+    new_dma_function = r'''static void rtw_pci_dma_check(
+        struct rtw_dev *rtwdev,
+        struct rtw_pci_rx_ring *rx_ring,
+        u32 idx)
+{
+    struct rtw_pci *rtwpci =
+        (struct rtw_pci *)rtwdev->priv;
 
-              rtwpci->rx_tag =
-                  (
-                      rtwpci->rx_tag
-                      +
-                      1
-                  )
-                  %
-                  RX_TAG_MAX;
-          }"""
+    const struct rtw_chip_info *chip =
+        rtwdev->chip;
 
-          if (
-              "HP256G8 v8 RX tag resync"
-              not in lp
-          ):
+    struct rtw_pci_rx_buffer_desc *buf_desc;
 
-              if old_dma_check not in lp:
-                  raise SystemExit(
-                      "ERROR: exact "
-                      "rtw_pci_dma_check "
-                      "block not found"
-                  )
+    u32 desc_sz =
+        chip->rx_buf_desc_sz;
 
-              lp = lp.replace(
-                  old_dma_check,
-                  new_dma_check,
-                  1
-              )
+    u16 total_pkt_size = 0;
 
-          print("RX DMA tag recovery: OK")
+    u16 expected =
+        rtwpci->rx_tag;
 
+    int i;
+
+    /*
+     * HP256G8 v8
+     *
+     * Count persistent RX DMA tag mismatches.
+     *
+     * Do not flood the macOS kernel log for
+     * every received frame.
+     */
+    static u32 mismatch_count = 0;
+
+
+    buf_desc =
+        (struct rtw_pci_rx_buffer_desc *)
+        (
+            rx_ring->r.head
+            +
+            idx * desc_sz
+        );
+
+
+    /*
+     * HP256G8 v8 DMA RECOVERY
+     * ========================================
+     *
+     * RTL8821CE may expose the updated RX
+     * write pointer before the descriptor's
+     * DMA completion tag is fully visible
+     * to the CPU.
+     *
+     * Reading it immediately can therefore
+     * see the previous RX tag.
+     *
+     * Original code interprets that as:
+     *
+     * pci bus timeout, check dma status
+     *
+     * Wait briefly for the coherent
+     * descriptor write to become visible.
+     *
+     * Maximum:
+     *
+     * 100 iterations x 2 us = 200 us.
+     *
+     * Normal case exits on first read.
+     */
+
+    for (
+        i = 0;
+        i < 100;
+        i++
+    ) {
+
+        total_pkt_size =
+            le16_to_cpu(
+                READ_ONCE(
+                    buf_desc->total_pkt_size
+                )
+            );
+
+
+        if (
+            total_pkt_size ==
+            expected
+        ) {
+
+            break;
+        }
+
+
+        udelay(
+            2
+        );
+    }
+
+
+    /*
+     * If the descriptor still has a
+     * different completion sequence after
+     * the bounded wait, synchronize the
+     * software tag with what hardware
+     * actually completed.
+     *
+     * Without this correction, missing a
+     * single tag can leave host and device
+     * permanently one tag apart and produce
+     * a warning for practically every RX
+     * packet.
+     */
+
+    if (
+        total_pkt_size !=
+        expected
+    ) {
+
+        mismatch_count++;
+
+
+        /*
+         * Log first occurrence and then only
+         * once every 256 mismatches.
+         */
+
+        if (
+            mismatch_count == 1
+            ||
+            (
+                mismatch_count
+                &
+                0xff
+            )
+            ==
+            0
+        ) {
+
+            rtw_warn(
+                rtwdev,
+
+                "HP256G8 v8 RX tag resync "
+                "expected=%u observed=%u "
+                "count=%u\n",
+
+                expected,
+                total_pkt_size,
+                mismatch_count
+            );
+        }
+
+
+        /*
+         * Rebase software sequence to the
+         * completion tag actually observed.
+         */
+
+        rtwpci->rx_tag =
+            total_pkt_size;
+    }
+
+
+    /*
+     * Advance to the descriptor sequence
+     * expected for the next RX frame.
+     */
+
+    rtwpci->rx_tag =
+        (
+            rtwpci->rx_tag
+            +
+            1
+        )
+        %
+        RX_TAG_MAX;
+}
+
+
+'''
+
+
+    lp = (
+        lp[:dma_start]
+        +
+        new_dma_function
+        +
+        lp[dma_end:]
+    )
+
+
+    print(
+        "RX DMA tag recovery patch: OK"
+    )
+
+
+# ============================================================
+# VERIFY THE FUNCTION AFTER REPLACEMENT
+# ============================================================
+
+dma_verify_start = lp.find(
+    "static void rtw_pci_dma_check("
+)
+
+
+dma_verify_end = lp.find(
+    "static u32 __pci_get_hw_tx_ring_rp(",
+    dma_verify_start
+)
+
+
+if (
+    dma_verify_start < 0
+    or
+    dma_verify_end < 0
+):
+
+    raise SystemExit(
+        "ERROR: patched DMA function "
+        "boundaries are invalid"
+    )
+
+
+dma_verify = lp[
+    dma_verify_start:
+    dma_verify_end
+]
+
+
+required_dma = [
+
+    "HP256G8 v8 DMA RECOVERY",
+
+    "HP256G8 v8 RX tag resync",
+
+    "READ_ONCE",
+
+    "i < 100",
+
+    "udelay(",
+
+    "total_pkt_size",
+
+    "rtwpci->rx_tag",
+
+    "RX_TAG_MAX",
+]
+
+
+for marker in required_dma:
+
+    if (
+        marker not in dma_verify
+    ):
+
+        raise SystemExit(
+            "ERROR: DMA recovery marker "
+            f"missing: {marker}"
+        )
+
+
+# Original log spam must NOT remain
+# inside rtw_pci_dma_check().
+
+if (
+    "pci bus timeout, check dma status"
+    in dma_verify
+):
+
+    raise SystemExit(
+        "ERROR: old PCI DMA timeout "
+        "warning still present"
+    )
+
+
+print(
+    "Final RX DMA recovery validation: OK"
+)
           # ============================================================
           # 16. FINAL IEEE/WPA2 VALIDATION
           # ============================================================
