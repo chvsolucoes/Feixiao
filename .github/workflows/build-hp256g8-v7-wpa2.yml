@@ -1,6 +1,6 @@
 name: Build HP256G8 RTL8821CE v7 WPA2 Fix
 
-"on":
+on:
   workflow_dispatch:
 
 jobs:
@@ -8,6 +8,11 @@ jobs:
     runs-on: macos-latest
 
     steps:
+
+      # ============================================================
+      # 1. CHECKOUT FEIXIAO
+      # ============================================================
+
       - name: Checkout Feixiao
         uses: actions/checkout@v4
         with:
@@ -17,63 +22,143 @@ jobs:
           path: Feixiao
           fetch-depth: 0
 
+
+      # ============================================================
+      # 2. CLONE MATCHING RTW88-STABLE
+      # ============================================================
+
       - name: Clone matching rtw88-stable
         run: |
-          git clone https://github.com/thegwchr/rtw88-stable.git
+          git clone \
+            https://github.com/thegwchr/rtw88-stable.git
+
           cd rtw88-stable
-          git checkout d029a677c49266fad86750714eb5612becd134d3
-          echo "===== rtw88-stable revision ====="
+
+          git checkout \
+            d029a677c49266fad86750714eb5612becd134d3
+
+          echo
+          echo "========================================"
+          echo " RTW88-STABLE REVISION "
+          echo "========================================"
+
           git rev-parse HEAD
+
+
+      # ============================================================
+      # 3. APPLY HP256G8 V7 WPA2 FIX
+      # ============================================================
 
       - name: Apply HP256G8 v7 WPA2 fix
         working-directory: Feixiao
         shell: bash
+
         run: |
+
           cat > /tmp/patch_v7.py <<'PY'
+
           from pathlib import Path
 
-          ieee = Path("src/kext/RTW88IEEE80211.cpp")
-          pci = Path("src/kext/RTW88PCIDevice.cpp")
-          compat = Path("src/compat/rtw88_compat.c")
 
-          for f in (ieee, pci, compat):
-              if not f.exists():
-                  raise SystemExit(f"ERROR: required source missing: {f}")
-
-          c = ieee.read_text()
-          p = pci.read_text()
-          r = compat.read_text()
-
-          print("=" * 72)
-          print("HP256G8 RTL8821CE v7 WPA2 FIX")
-          print("=" * 72)
-
-          # ============================================================
-          # 1. Preserve native TX/DMA correctness fixes
-          # ============================================================
-
-          if "IOGatedOutputQueue::withTarget" not in p:
-              raise SystemExit(
-                  "ERROR: IOGatedOutputQueue TX serialization missing"
-              )
-
-          if "drainPendingFree()" not in p:
-              raise SystemExit(
-                  "ERROR: deferred DMA free support missing"
-              )
-
-          print("DMA/TX serialization: OK")
-          print("Deferred DMA free: OK")
-
-          # ============================================================
-          # 2. Remove old 6 Mbps 5 GHz rate lock
-          # ============================================================
-
-          legacy_rate = (
-              "rtwdev->dm_info.fix_rate = DESC_RATE6M;"
+          ieee = Path(
+              "src/kext/RTW88IEEE80211.cpp"
           )
 
-          if legacy_rate in r:
+          pci = Path(
+              "src/kext/RTW88PCIDevice.cpp"
+          )
+
+          compat = Path(
+              "src/compat/rtw88_compat.c"
+          )
+
+
+          # ========================================================
+          # SOURCE FILE CHECK
+          # ========================================================
+
+          for f in (
+              ieee,
+              pci,
+              compat
+          ):
+
+              if not f.exists():
+
+                  raise SystemExit(
+                      f"ERROR: required source missing: {f}"
+                  )
+
+
+          c = ieee.read_text()
+
+          p = pci.read_text()
+
+          r = compat.read_text()
+
+
+          print(
+              "=" * 72
+          )
+
+          print(
+              "HP256G8 RTL8821CE v7 WPA2 FIX"
+          )
+
+          print(
+              "=" * 72
+          )
+
+
+          # ========================================================
+          # 1. VERIFY NATIVE DMA/TX FIXES
+          # ========================================================
+
+          if (
+              "IOGatedOutputQueue::withTarget"
+              not in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: IOGatedOutputQueue "
+                  "TX serialization missing"
+              )
+
+
+          if (
+              "drainPendingFree()"
+              not in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: deferred DMA free "
+                  "support missing"
+              )
+
+
+          print(
+              "DMA/TX serialization: OK"
+          )
+
+          print(
+              "Deferred DMA free: OK"
+          )
+
+
+          # ========================================================
+          # 2. REMOVE LEGACY 6 MBPS FIXED RATE
+          # ========================================================
+
+          legacy_rate = (
+              "rtwdev->dm_info.fix_rate = "
+              "DESC_RATE6M;"
+          )
+
+
+          if (
+              legacy_rate in r
+          ):
+
               r = r.replace(
                   legacy_rate,
                   "rtwdev->dm_info.fix_rate = 0xFF;"
@@ -82,14 +167,21 @@ jobs:
               print(
                   "Removed legacy fixed 6 Mbps rate"
               )
+
           else:
+
               print(
                   "Legacy 6 Mbps rate lock not present"
               )
 
-          # ============================================================
-          # 3. Keep HT/VHT but cap validation build at 40 MHz
-          # ============================================================
+
+          # ========================================================
+          # 3. CAP VHT OPERATION TO 40 MHz
+          #
+          # Keep HT/VHT enabled.
+          # Keep A-MPDU enabled.
+          # Only prevent 80 MHz during WPA2 validation.
+          # ========================================================
 
           old80 = (
               "if (chip80 && "
@@ -97,18 +189,27 @@ jobs:
               "vhtSeg0 != 0) {"
           )
 
+
           new80 = (
               "if (false && chip80 && "
               "vhtWidth == 1 && "
               "vhtSeg0 != 0) {"
           )
 
-          if new80 not in c:
 
-              if old80 not in c:
+          if (
+              new80 not in c
+          ):
+
+              if (
+                  old80 not in c
+              ):
+
                   raise SystemExit(
-                      "ERROR: VHT80 negotiation block not found"
+                      "ERROR: VHT80 negotiation "
+                      "block not found"
                   )
+
 
               c = c.replace(
                   old80,
@@ -116,40 +217,60 @@ jobs:
                   1
               )
 
+
           print(
               "VHT width cap: 40 MHz"
           )
 
-          # ============================================================
-          # 4. WPA2 RSN M4 Key Length = 0
-          # ============================================================
+
+          # ========================================================
+          # 4. WPA2 M4 KEY LENGTH
+          #
+          # RSN M4:
+          #
+          # Key Length = 0
+          #
+          # M2:
+          #
+          # Key Length = 16
+          # ========================================================
 
           old_keylen = (
               "    key[3] = 0; key[4] = 16; "
               "/* key length = 16 (AES-128) */"
           )
 
+
           new_keylen = """    if (step == 4) {
+
               key[3] = 0;
               key[4] = 0;
 
               IOLog(
                   "rtw88: HP256G8 v7 M4 key_length=0\\n"
               );
+
           } else {
+
               key[3] = 0;
               key[4] = 16;
           }"""
+
 
           if (
               "HP256G8 v7 M4 key_length=0"
               not in c
           ):
 
-              if old_keylen not in c:
+              if (
+                  old_keylen not in c
+              ):
+
                   raise SystemExit(
-                      "ERROR: EAPOL key-length assignment not found"
+                      "ERROR: EAPOL key-length "
+                      "assignment not found"
                   )
+
 
               c = c.replace(
                   old_keylen,
@@ -157,20 +278,28 @@ jobs:
                   1
               )
 
+
           print(
               "M4 Key Length: OK"
           )
 
-          # ============================================================
-          # 5. WPA2 RSN M4 Key Nonce = zero
-          # ============================================================
+
+          # ========================================================
+          # 5. WPA2 M4 KEY NONCE
+          #
+          # M4 must leave the nonce field zero.
+          #
+          # M2 keeps SNonce.
+          # ========================================================
 
           old_nonce = (
               "    memcpy(key + 13, _snonce, 32);       "
               "/* key[13..44] = SNonce */"
           )
 
+
           new_nonce = """    if (step == 4) {
+
               memset(
                   key + 13,
                   0,
@@ -180,7 +309,9 @@ jobs:
               IOLog(
                   "rtw88: HP256G8 v7 M4 nonce zeroed\\n"
               );
+
           } else {
+
               memcpy(
                   key + 13,
                   _snonce,
@@ -188,15 +319,21 @@ jobs:
               );
           }"""
 
+
           if (
               "HP256G8 v7 M4 nonce zeroed"
               not in c
           ):
 
-              if old_nonce not in c:
+              if (
+                  old_nonce not in c
+              ):
+
                   raise SystemExit(
-                      "ERROR: EAPOL nonce assignment not found"
+                      "ERROR: EAPOL nonce "
+                      "assignment not found"
                   )
+
 
               c = c.replace(
                   old_nonce,
@@ -204,25 +341,25 @@ jobs:
                   1
               )
 
+
           print(
               "M4 Key Nonce: OK"
           )
 
-          # ============================================================
-          # 6. Add detailed M3 diagnostics
-          # ============================================================
+
+          # ========================================================
+          # 6. ADD M3 DIAGNOSTICS
+          # ========================================================
 
           m3_marker = (
               "    } else if (is_m3) {"
           )
 
+
           m3_replacement = """    } else if (is_m3) {
 
               IOLog(
-                  "rtw88: HP256G8 v7 received M3 replay="
-                  "%02x%02x%02x%02x"
-                  "%02x%02x%02x%02x\\n",
-
+                  "rtw88: HP256G8 v7 received M3 replay=%02x%02x%02x%02x%02x%02x%02x%02x\\n",
                   data[9],
                   data[10],
                   data[11],
@@ -233,15 +370,21 @@ jobs:
                   data[16]
               );"""
 
+
           if (
               "HP256G8 v7 received M3"
               not in c
           ):
 
-              if m3_marker not in c:
+              if (
+                  m3_marker not in c
+              ):
+
                   raise SystemExit(
-                      "ERROR: WPA2 M3 handler not found"
+                      "ERROR: WPA2 M3 "
+                      "handler not found"
                   )
+
 
               c = c.replace(
                   m3_marker,
@@ -249,27 +392,34 @@ jobs:
                   1
               )
 
+
           print(
               "M3 diagnostics: OK"
           )
 
-          # ============================================================
-          # 7. Reorder M4 / PTK / GTK
+
+          # ========================================================
+          # 7. FIX M4 / PTK / GTK ORDERING
+          #
+          # ORIGINAL:
+          #
+          # PTK install
+          # GTK install
+          # M4 transmit
+          #
+          # V7:
+          #
+          # M4 transmit
+          # wait
+          # PTK install
+          # GTK install
           #
           # IMPORTANT:
           #
-          # Do not match the whole C++ block by whitespace.
+          # Do NOT locate using exact whitespace.
           #
-          # Locate the block using:
-          #
-          # PTK install
-          #       ↓
-          # M4
-          #       ↓
-          # CONNECTED state
-          #
-          # Search is scoped to the M3 handler.
-          # ============================================================
+          # Locate using unique anchors inside M3 handler.
+          # ========================================================
 
           if (
               "HP256G8 v7 sending EAPOL M4 "
@@ -281,10 +431,16 @@ jobs:
                   "HP256G8 v7 received M3"
               )
 
-              if m3_start < 0:
+
+              if (
+                  m3_start < 0
+              ):
+
                   raise SystemExit(
-                      "ERROR: patched M3 handler cannot be located"
+                      "ERROR: patched M3 handler "
+                      "cannot be located"
                   )
+
 
               ptk_anchor = (
                   "if (!installKey("
@@ -293,6 +449,7 @@ jobs:
                   "0, "
                   "WLAN_CIPHER_SUITE_CCMP,"
               )
+
 
               m4_anchor = (
                   "sendEAPOLKey("
@@ -303,64 +460,100 @@ jobs:
                   "true);"
               )
 
+
               state_anchor = (
                   "_state = "
                   "RTW88_STATE_CONNECTED;"
               )
+
 
               start = c.find(
                   ptk_anchor,
                   m3_start
               )
 
-              if start < 0:
+
+              if (
+                  start < 0
+              ):
+
                   raise SystemExit(
                       "ERROR: PTK install anchor "
                       "not found in M3 handler"
                   )
+
 
               send4 = c.find(
                   m4_anchor,
                   start
               )
 
-              if send4 < 0:
+
+              if (
+                  send4 < 0
+              ):
+
                   raise SystemExit(
                       "ERROR: EAPOL M4 anchor "
                       "not found in M3 handler"
                   )
+
 
               end = c.find(
                   state_anchor,
                   send4
               )
 
-              if end < 0:
+
+              if (
+                  end < 0
+              ):
+
                   raise SystemExit(
-                      "ERROR: CONNECTED state anchor "
-                      "not found after M4"
+                      "ERROR: CONNECTED state "
+                      "anchor not found after M4"
                   )
+
 
               end += len(
                   state_anchor
               )
 
+
               old_block = c[
                   start:end
               ]
+
 
               if (
                   "installKey(&_gtkConf"
                   not in old_block
               ):
+
                   raise SystemExit(
-                      "ERROR: selected WPA2 block "
-                      "has no GTK install"
+                      "ERROR: selected WPA2 "
+                      "block has no GTK install"
                   )
 
+
+              if (
+                  "sendEAPOLKey(4"
+                  not in old_block
+              ):
+
+                  raise SystemExit(
+                      "ERROR: selected WPA2 "
+                      "block has no M4 transmit"
+                  )
+
+
+              print(
+                  "WPA2 PTK/GTK/M4 region located"
+              )
+
+
               new_block = """IOLog(
-              "rtw88: HP256G8 v7 "
-              "sending EAPOL M4 before PTK install\\n"
+              "rtw88: HP256G8 v7 sending EAPOL M4 before PTK install\\n"
           );
 
           sendEAPOLKey(
@@ -372,11 +565,9 @@ jobs:
           );
 
           /*
-           * txDataFrame() submits through
-           * the serialized TX path.
-           *
-           * Give M4 a short interval before
-           * enabling hardware CCMP.
+           * Allow the serialized TX path
+           * to submit EAPOL M4 before
+           * hardware CCMP is enabled.
            */
 
           IOSleep(
@@ -384,8 +575,7 @@ jobs:
           );
 
           IOLog(
-              "rtw88: HP256G8 v7 "
-              "M4 submitted, installing PTK\\n"
+              "rtw88: HP256G8 v7 M4 submitted, installing PTK\\n"
           );
 
           if (!installKey(
@@ -421,12 +611,12 @@ jobs:
               return;
 
           IOLog(
-              "rtw88: HP256G8 v7 "
-              "PTK/GTK installed after M4\\n"
+              "rtw88: HP256G8 v7 PTK/GTK installed after M4\\n"
           );
 
           _state =
               RTW88_STATE_CONNECTED;"""
+
 
               c = (
                   c[:start]
@@ -436,13 +626,15 @@ jobs:
                   c[end:]
               )
 
+
           print(
               "M4/PTK/GTK ordering: OK"
           )
 
-          # ============================================================
-          # 8. Delay A-MPDU until after WPA2 settles
-          # ============================================================
+
+          # ========================================================
+          # 8. DELAY A-MPDU AFTER WPA2
+          # ========================================================
 
           old_ampdu = (
               "        startTxAggregation();   "
@@ -450,28 +642,32 @@ jobs:
               "negotiate uplink A-MPDU */"
           )
 
+
           new_ampdu = """        IOSleep(
               100
           );
 
           IOLog(
-              "rtw88: HP256G8 v7 "
-              "WPA2 settle complete, "
-              "starting A-MPDU\\n"
+              "rtw88: HP256G8 v7 WPA2 settle complete, starting A-MPDU\\n"
           );
 
           startTxAggregation();"""
+
 
           if (
               "HP256G8 v7 WPA2 settle complete"
               not in c
           ):
 
-              if old_ampdu not in c:
+              if (
+                  old_ampdu not in c
+              ):
+
                   raise SystemExit(
                       "ERROR: WPA2 A-MPDU "
                       "start line not found"
                   )
+
 
               c = c.replace(
                   old_ampdu,
@@ -479,13 +675,15 @@ jobs:
                   1
               )
 
+
           print(
               "A-MPDU post-WPA2 delay: OK"
           )
 
-          # ============================================================
-          # 9. Add explicit v7 identification
-          # ============================================================
+
+          # ========================================================
+          # 9. ADD BUILD IDENTIFICATION
+          # ========================================================
 
           old_chandef_log = (
               '    IOLog('
@@ -493,6 +691,7 @@ jobs:
               '%u MHz '
               '(primary=%u cf1=%u)\\n",'
           )
+
 
           new_chandef_log = (
               '    IOLog('
@@ -502,15 +701,21 @@ jobs:
               old_chandef_log
           )
 
+
           if (
               "HP256G8 v7 WPA2 Fix active"
               not in c
           ):
 
-              if old_chandef_log not in c:
+              if (
+                  old_chandef_log not in c
+              ):
+
                   raise SystemExit(
-                      "ERROR: chandef log marker not found"
+                      "ERROR: connected chandef "
+                      "log marker not found"
                   )
+
 
               c = c.replace(
                   old_chandef_log,
@@ -518,13 +723,15 @@ jobs:
                   1
               )
 
+
           print(
               "Build marker: OK"
           )
 
-          # ============================================================
-          # 10. Conservative TX ring headroom from v6
-          # ============================================================
+
+          # ========================================================
+          # 10. CONSERVATIVE TX-RING HEADROOM
+          # ========================================================
 
           p = p.replace(
               "static constexpr unsigned int "
@@ -534,6 +741,7 @@ jobs:
               "kRTW88TxStallAvail = 128;"
           )
 
+
           p = p.replace(
               "static constexpr unsigned int "
               "kRTW88TxResumeAvail = 160;",
@@ -542,13 +750,22 @@ jobs:
               "kRTW88TxResumeAvail = 192;"
           )
 
+
           print(
               "TX-ring headroom: OK"
           )
 
-          # ============================================================
-          # 11. FINAL SOURCE VALIDATION
-          # ============================================================
+
+          # ========================================================
+          # 11. FINAL C++ VALIDATION
+          #
+          # IMPORTANT:
+          #
+          # All strings below now exist continuously
+          # in the source text.
+          #
+          # This fixes the previous false exit code 1.
+          # ========================================================
 
           required_cpp = [
 
@@ -569,52 +786,141 @@ jobs:
               "HP256G8 v7 PTK/GTK installed "
               "after M4",
 
-              "HP256G8 v7 WPA2 settle complete",
+              "HP256G8 v7 WPA2 settle complete, "
+              "starting A-MPDU",
 
               "startTxAggregation();",
           ]
 
+
           for marker in required_cpp:
 
-              if marker not in c:
+              if (
+                  marker not in c
+              ):
+
                   raise SystemExit(
-                      "ERROR: required C++ marker "
-                      f"missing: {marker}"
+                      "ERROR: required C++ "
+                      f"marker missing: {marker}"
                   )
+
+
+          print(
+              "Final C++ marker validation: OK"
+          )
+
+
+          # ========================================================
+          # 12. FINAL DMA/TX VALIDATION
+          # ========================================================
 
           if (
               "IOGatedOutputQueue::withTarget"
               not in p
           ):
+
               raise SystemExit(
                   "ERROR: TX serialization "
                   "disappeared during patch"
               )
 
+
           if (
               "drainPendingFree()"
               not in p
           ):
+
               raise SystemExit(
                   "ERROR: deferred DMA free "
                   "disappeared during patch"
               )
 
+
           if (
               "kRTW88TxStallAvail = 128;"
               not in p
-              or
+          ):
+
+              raise SystemExit(
+                  "ERROR: TX stall threshold "
+                  "was not patched"
+              )
+
+
+          if (
               "kRTW88TxResumeAvail = 192;"
               not in p
           ):
+
               raise SystemExit(
-                  "ERROR: TX-ring thresholds "
-                  "were not patched"
+                  "ERROR: TX resume threshold "
+                  "was not patched"
               )
 
-          # ============================================================
-          # 12. WRITE PATCHED SOURCE
-          # ============================================================
+
+          print(
+              "Final DMA/TX validation: OK"
+          )
+
+
+          # ========================================================
+          # 13. FINAL WPA2 ORDER VALIDATION
+          # ========================================================
+
+          pos_m4 = c.find(
+              "HP256G8 v7 sending EAPOL M4 "
+              "before PTK install"
+          )
+
+
+          pos_ptk = c.find(
+              "HP256G8 v7 M4 submitted, "
+              "installing PTK"
+          )
+
+
+          pos_keys = c.find(
+              "HP256G8 v7 PTK/GTK installed "
+              "after M4"
+          )
+
+
+          if (
+              pos_m4 < 0
+              or
+              pos_ptk < 0
+              or
+              pos_keys < 0
+          ):
+
+              raise SystemExit(
+                  "ERROR: final WPA2 order "
+                  "markers missing"
+              )
+
+
+          if not (
+              pos_m4
+              <
+              pos_ptk
+              <
+              pos_keys
+          ):
+
+              raise SystemExit(
+                  "ERROR: final WPA2 M4/PTK/GTK "
+                  "order is incorrect"
+              )
+
+
+          print(
+              "Final WPA2 order validation: OK"
+          )
+
+
+          # ========================================================
+          # 14. WRITE PATCHED SOURCES
+          # ========================================================
 
           ieee.write_text(
               c
@@ -627,6 +933,9 @@ jobs:
           compat.write_text(
               r
           )
+
+
+          print()
 
           print(
               "=" * 72
@@ -641,10 +950,13 @@ jobs:
               "=" * 72
           )
 
+
           PY
+
 
           python3 \
             /tmp/patch_v7.py
+
 
           echo
           echo "========================================"
@@ -655,16 +967,54 @@ jobs:
             "HP256G8 v7" \
             src/kext/RTW88IEEE80211.cpp
 
+
           echo
           echo "========================================"
-          echo " VERIFY WPA2 ORDER "
+          echo " VERIFY M3 "
           echo "========================================"
 
           grep -n \
-            -A 35 \
+            -A 20 \
+            -B 5 \
+            "HP256G8 v7 received M3" \
+            src/kext/RTW88IEEE80211.cpp
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY M4/PTK ORDER "
+          echo "========================================"
+
+          grep -n \
+            -A 55 \
             -B 10 \
             "sending EAPOL M4 before PTK install" \
             src/kext/RTW88IEEE80211.cpp
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY M4 KEY LENGTH "
+          echo "========================================"
+
+          grep -n \
+            -A 12 \
+            -B 5 \
+            "M4 key_length=0" \
+            src/kext/RTW88IEEE80211.cpp
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY M4 NONCE "
+          echo "========================================"
+
+          grep -n \
+            -A 12 \
+            -B 5 \
+            "M4 nonce zeroed" \
+            src/kext/RTW88IEEE80211.cpp
+
 
           echo
           echo "========================================"
@@ -675,6 +1025,7 @@ jobs:
             "IOGatedOutputQueue::withTarget" \
             src/kext/RTW88PCIDevice.cpp
 
+
           echo
           echo "========================================"
           echo " VERIFY DEFERRED DMA FREE "
@@ -683,6 +1034,7 @@ jobs:
           grep -n \
             "drainPendingFree" \
             src/kext/RTW88PCIDevice.cpp
+
 
           echo
           echo "========================================"
@@ -697,6 +1049,7 @@ jobs:
             "kRTW88TxResumeAvail" \
             src/kext/RTW88PCIDevice.cpp
 
+
           echo
           echo "========================================"
           echo " VERIFY RATE "
@@ -707,12 +1060,14 @@ jobs:
             src/compat/rtw88_compat.c \
             | head -20
 
+
       # ============================================================
       # 4. DOWNLOAD FIRMWARE
       # ============================================================
 
       - name: Download firmware
         run: |
+
           cd Feixiao/firmware
 
           for fw in \
@@ -740,39 +1095,54 @@ jobs:
 
           done
 
+
           echo
-          echo "===== Firmware files ====="
+          echo "========================================"
+          echo " FIRMWARE FILES "
+          echo "========================================"
 
           ls \
             -lh \
             *.bin
 
+
       # ============================================================
-      # 5. SHOW EXACT BUILD ENVIRONMENT
+      # 5. SHOW BUILD ENVIRONMENT
       # ============================================================
 
       - name: Show build environment
         run: |
 
           echo
-          echo "===== macOS ====="
+          echo "========================================"
+          echo " MACOS "
+          echo "========================================"
 
           sw_vers
 
+
           echo
-          echo "===== Xcode ====="
+          echo "========================================"
+          echo " XCODE "
+          echo "========================================"
 
           xcodebuild \
             -version
 
+
           echo
-          echo "===== clang ====="
+          echo "========================================"
+          echo " CLANG "
+          echo "========================================"
 
           clang \
             --version
 
+
           echo
-          echo "===== Feixiao revision ====="
+          echo "========================================"
+          echo " FEIXIAO REVISION "
+          echo "========================================"
 
           cd Feixiao
 
@@ -780,14 +1150,18 @@ jobs:
             rev-parse \
             HEAD
 
+
           echo
-          echo "===== rtw88-stable revision ====="
+          echo "========================================"
+          echo " RTW88-STABLE REVISION "
+          echo "========================================"
 
           cd ../rtw88-stable
 
           git \
             rev-parse \
             HEAD
+
 
       # ============================================================
       # 6. BUILD
@@ -801,12 +1175,15 @@ jobs:
           make clean \
             || true
 
+
           echo
           echo "========================================"
           echo " BUILD HP256G8 RTL8821CE V7 WPA2 FIX "
           echo "========================================"
 
+
           make all
+
 
       # ============================================================
       # 7. VERIFY BUILD OUTPUT
@@ -819,32 +1196,45 @@ jobs:
             -d \
             Feixiao/build/out/rtw88.kext
 
+
           test \
             -f \
             Feixiao/build/out/rtw88ctl
 
+
           echo
-          echo "===== KEXT ====="
+          echo "========================================"
+          echo " KEXT ARCHITECTURE "
+          echo "========================================"
 
           file \
             Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88
 
+
           echo
-          echo "===== RTW88CTL ====="
+          echo "========================================"
+          echo " RTW88CTL ARCHITECTURE "
+          echo "========================================"
 
           file \
             Feixiao/build/out/rtw88ctl
 
+
           echo
-          echo "===== V7 BINARY MARKERS ====="
+          echo "========================================"
+          echo " V7 BINARY MARKERS "
+          echo "========================================"
 
           strings \
             Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
             | grep \
               "HP256G8 v7"
 
+
           echo
-          echo "===== WPA2 / A-MPDU MARKERS ====="
+          echo "========================================"
+          echo " WPA2 / EAPOL / AMPDU MARKERS "
+          echo "========================================"
 
           strings \
             Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
@@ -852,6 +1242,19 @@ jobs:
               "WPA2 connected|EAPOL|ADDBA|A-MPDU" \
             | head -100 \
             || true
+
+
+          echo
+          echo "========================================"
+          echo " INFO.PLIST "
+          echo "========================================"
+
+          plutil \
+            -p \
+            Feixiao/build/out/rtw88.kext/Contents/Info.plist \
+            | head -80 \
+            || true
+
 
       # ============================================================
       # 8. PACKAGE
@@ -862,123 +1265,268 @@ jobs:
 
           OUT="${{ runner.temp }}/Feixiao-HP256G8-v7-WPA2-Fix"
 
+
           mkdir \
             -p \
             "$OUT"
+
 
           cp \
             -R \
             Feixiao/build/out/rtw88.kext \
             "$OUT/"
 
+
           cp \
             Feixiao/build/out/rtw88ctl \
             "$OUT/"
+
 
           chmod \
             +x \
             "$OUT/rtw88ctl"
 
+
           cat > "$OUT/BUILD-INFO.txt" <<'EOF'
+
           Feixiao HP 256 G8 / RTL8821CE
-          =========================================
+          ===============================================
 
-          Build:
-          v7 WPA2 Fix
+          BUILD
+          ===============================================
 
-          Feixiao:
+          HP256G8 v7 WPA2 Fix
+
+
+          FEIXIAO BASE
+          ===============================================
+
           e963f43188382eced4ef2fa75d19ce4db2315c68
 
-          rtw88-stable:
+
+          RTW88-STABLE
+          ===============================================
+
           d029a677c49266fad86750714eb5612becd134d3
 
 
-          RETAINED
-          =========================================
+          HARDWARE
+          ===============================================
 
-          - native IOGatedOutputQueue TX serialization
+          HP 256 G8
 
-          - native deferred DMA free handling
+          Realtek RTL8821CE
 
-          - HT/VHT
+          PCI ID:
 
-          - A-MPDU/A-MSDU path
-
-          - firmware rate adaptation
+          10EC:C821
 
 
-          V7 CHANGES
-          =========================================
+          TARGET PROBLEM
+          ===============================================
 
-          - remove legacy fixed 6 Mbps rate if present
+          Wi-Fi successfully:
 
-          - cap VHT operation to 40 MHz
-            during WPA2 validation
+          - scans
+          - authenticates
+          - associates
+          - completes M1/M2/M3 processing
+          - installs CCMP
+          - starts A-MPDU
 
-          - log received M3 replay counter
-
-          - M4 RSN Key Length = 0
-
-          - M4 Key Nonce = zero
-
-          - send M4 before hardware
-            PTK/GTK installation
-
-          - wait 40 ms before enabling PTK
-
-          - wait 100 ms before starting A-MPDU
-
-          - conservative TX-ring thresholds
-            128 / 192
-
-          - explicit v7 diagnostic markers
-
-
-          TARGET SYMPTOM
-          =========================================
+          but AP disconnects with:
 
           deauth from AP, reason=15
 
 
-          EXPECTED LOGS
-          =========================================
+          DMA STATUS BEFORE V7
+          ===============================================
 
-          HP256G8 v7 WPA2 Fix active
+          v6 no longer showed the previous continuous:
 
-          HP256G8 v7 received M3
+          pci bus timeout, check dma status
 
-          HP256G8 v7 M4 key_length=0
+          during the WPA2 failure test.
 
-          HP256G8 v7 M4 nonce zeroed
+          Therefore v7 focuses on WPA2 M4 while retaining
+          the newer DMA/TX fixes.
 
-          HP256G8 v7 sending EAPOL M4 before PTK install
 
-          HP256G8 v7 M4 submitted, installing PTK
+          RETAINED FEATURES
+          ===============================================
 
-          HP256G8 v7 PTK/GTK installed after M4
+          - native IOGatedOutputQueue TX serialization
 
-          HP256G8 v7 WPA2 settle complete, starting A-MPDU
+          - deferred DMA free handling
+
+          - HT
+
+          - VHT
+
+          - A-MPDU
+
+          - A-MSDU path
+
+          - firmware rate adaptation
+
+          - RF calibration
+
+          - WPA2 CCMP
+
+          - 2.4 GHz support
+
+          - 5 GHz support
+
+
+          V7 WPA2 FIXES
+          ===============================================
+
+          1.
+
+          M4 RSN Key Length = 0
+
+
+          2.
+
+          M4 Key Nonce = all zero
+
+
+          3.
+
+          EAPOL M4 is submitted before enabling the
+          pairwise hardware CCMP key
+
+
+          4.
+
+          PTK is installed after M4 submission
+
+
+          5.
+
+          GTK is installed after M4 submission
+
+
+          6.
+
+          40 ms interval before PTK/GTK installation
+
+
+          7.
+
+          100 ms interval before starting TX A-MPDU
+
+
+          8.
+
+          detailed M3 replay-counter diagnostics
+
+
+          9.
+
+          explicit v7 runtime diagnostic markers
+
+
+          CHANNEL WIDTH
+          ===============================================
+
+          HT/VHT remains enabled.
+
+          Maximum operation for this validation build:
+
+          40 MHz
+
+          80 MHz intentionally disabled until WPA2
+          stability is confirmed.
+
+
+          TX RING
+          ===============================================
+
+          Stall threshold:
+
+          128 free descriptors
+
+
+          Resume threshold:
+
+          192 free descriptors
+
+
+          RATE CONTROL
+          ===============================================
+
+          Legacy fixed 6 Mbps rate is not used.
+
+          Firmware automatic rate adaptation remains
+          available.
+
+
+          EXPECTED LOG
+          ===============================================
+
+          rtw88: HP256G8 v7 WPA2 Fix active
+
+          rtw88: HP256G8 v7 received M3
+
+          rtw88: HP256G8 v7 M4 key_length=0
+
+          rtw88: HP256G8 v7 M4 nonce zeroed
+
+          rtw88: HP256G8 v7 sending EAPOL M4 before PTK install
+
+          rtw88: HP256G8 v7 M4 submitted, installing PTK
+
+          rtw88: HP256G8 v7 PTK/GTK installed after M4
+
+          rtw88: HP256G8 v7 WPA2 settle complete, starting A-MPDU
+
+
+          SUCCESS CONDITION
+          ===============================================
+
+          The AP should stop producing:
+
+          deauth from AP, reason=15
+
+
+          NEXT STEP AFTER STABILITY
+          ===============================================
+
+          If WPA2 remains connected and traffic is stable:
+
+          - retain the v7 WPA2 fix
+          - retain DMA/TX serialization
+          - enable 80 MHz
+          - tune throughput for 5 GHz
+          - target sustained >100 Mbps
 
 
           IMPORTANT
-          =========================================
+          ===============================================
 
-          Experimental build.
+          Experimental kernel driver.
 
-          Keep the known-working backup kext.
+          Keep a known-working rtw88.kext backup.
 
-          Use rtw88.kext and rtw88ctl
-          from this same artifact together.
+          Do not leave two copies of rtw88.kext
+          inside EFI/OC/Kexts.
+
+          Always use rtw88.kext and rtw88ctl
+          from the same artifact/build.
 
           EOF
 
+
           cd \
             "${{ runner.temp }}"
+
 
           zip \
             -r \
             Feixiao_HP256G8_v7_WPA2_Fix.zip \
             Feixiao-HP256G8-v7-WPA2-Fix
+
 
       # ============================================================
       # 9. UPLOAD ARTIFACT
@@ -989,5 +1537,7 @@ jobs:
 
         with:
           name: Feixiao-HP256G8-v7-WPA2-Fix
+
           path: ${{ runner.temp }}/Feixiao_HP256G8_v7_WPA2_Fix.zip
+
           retention-days: 7
