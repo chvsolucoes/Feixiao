@@ -8,6 +8,9 @@ jobs:
     runs-on: macos-latest
 
     steps:
+      # ============================================================
+      # 1. Checkout da base que sabemos que funciona no HP 256 G8
+      # ============================================================
       - name: Checkout Feixiao v1.0.2
         uses: actions/checkout@v4
         with:
@@ -17,213 +20,276 @@ jobs:
           path: Feixiao
           fetch-depth: 0
 
+      # ============================================================
+      # 2. Patch específico PCIe / DMA para RTL8821CE
+      # ============================================================
       - name: Apply HP256G8 PCI DMA stability patch
         working-directory: Feixiao
         run: |
           python3 <<'PY'
           from pathlib import Path
-          import re
 
-          root = Path(".")
-
-          candidates = [
-              Path("src/kext/RTW88PCIDevice.cpp"),
-              Path("src/kext/RTW88IEEE80211.cpp"),
-              Path("src/compat/rtw88_compat.c"),
-              Path("src/compat/rtw88_compat.h"),
-          ]
-
-          print("=== Searching PCIe / ASPM related code ===")
-
-          for p in candidates:
-              if not p.exists():
-                  continue
-
-              text = p.read_text(errors="ignore")
-
-              hits = []
-
-              for kw in [
-                  "ASPM",
-                  "aspm",
-                  "L1",
-                  "L0s",
-                  "power",
-                  "pci",
-                  "PCI",
-              ]:
-                  if kw in text:
-                      hits.append(kw)
-
-              if hits:
-                  print(p, hits)
-
-          #
-          # Patch RTW88PCIDevice.cpp if present.
-          #
           pci = Path("src/kext/RTW88PCIDevice.cpp")
 
           if not pci.exists():
               raise SystemExit(
-                  "ERROR: RTW88PCIDevice.cpp not found"
+                  "ERROR: src/kext/RTW88PCIDevice.cpp not found"
               )
 
           c = pci.read_text()
 
+          # --------------------------------------------------------
+          # PATCH A
           #
-          # Inject helper that forces PCI command/state awake.
+          # start():
+          # A v1.0.2 já faz:
           #
-          if "hp256g8ForcePCIActive" not in c:
+          #   _pciDev->setBusMasterEnable(true);
+          #   _pciDev->setMemoryEnable(true);
+          #
+          # Logo depois disso desativamos ASPM L0s/L1
+          # no Link Control do PCI Express Capability.
+          #
+          # PCI Express Capability ID = 0x10
+          # Link Control = capability + 0x10
+          # ASPM bits = Link Control bits 0 e 1
+          # --------------------------------------------------------
 
-              insert = c.find(
-                  "OSDefineMetaClassAndStructors"
-              )
+          start_old = """    /* Enable bus mastering & memory space */
+              _pciDev->setBusMasterEnable(true);
+              _pciDev->setMemoryEnable(true);
+          """
 
-              if insert == -1:
-                  raise SystemExit(
-                      "ERROR: could not find insertion point"
-                  )
-
-              helper = r'''
-          static void hp256g8ForcePCIActive(IOPCIDevice *dev)
-          {
-              if (!dev)
-                  return;
+          start_new = """    /* Enable bus mastering & memory space */
+              _pciDev->setBusMasterEnable(true);
+              _pciDev->setMemoryEnable(true);
 
               /*
-               * Keep the RTL8821CE awake and bus-mastering.
+               * HP 256 G8 / RTL8821CE stability patch
                *
-               * This is intentionally conservative:
-               * - enable memory access
-               * - enable bus mastering
-               * - avoid transitioning the device into a
-               *   low-power PCI state while the driver is active
+               * Disable PCIe ASPM L0s/L1 for the Wi-Fi device.
+               * The driver remains fully powered while active.
                */
+              {
+                  int pcieCap = pciFindCapability(0x10);
 
-              dev->setMemoryEnable(true);
-              dev->setBusMasterEnable(true);
+                  if (pcieCap) {
+                      UInt16 linkCtl =
+                          pciReadWord(pcieCap + 0x10);
 
-              dev->enablePCIPowerManagement(
-                  kPCIPMCPMESupportFromD0
-              );
+                      UInt16 newLinkCtl =
+                          (UInt16)(linkCtl & ~0x0003);
 
-              dev->setPowerState(
-                  1,
-                  dev
-              );
+                      if (newLinkCtl != linkCtl) {
+                          pciWriteWord(
+                              pcieCap + 0x10,
+                              newLinkCtl
+                          );
+                      }
 
-              IOLog(
-                  "rtw88: HP256G8 PCI active state forced\n"
-              );
-          }
+                      IOLog(
+                          "rtw88: HP256G8 PCIe ASPM disabled "
+                          "LinkCtl 0x%04x -> 0x%04x\\n",
+                          linkCtl,
+                          newLinkCtl
+                      );
+                  }
+                  else {
+                      IOLog(
+                          "rtw88: HP256G8 PCIe capability "
+                          "not found\\n"
+                      );
+                  }
+              }
+          """
 
-          '''
+          if "HP256G8 PCIe ASPM disabled" not in c:
+              if start_old not in c:
+                  raise SystemExit(
+                      "ERROR: v1.0.2 PCI start block not found"
+                  )
 
-              c = c[:insert] + helper + c[insert:]
-
-          #
-          # Find calls where PCI device is enabled/opened.
-          # Add our helper immediately afterwards.
-          #
-          patterns = [
-              (
-                  r'(_pcidev->setMemoryEnable\s*\(\s*true\s*\)\s*;)',
-                  r'\1\n    hp256g8ForcePCIActive(_pcidev);'
-              ),
-              (
-                  r'(_pcidev->setBusMasterEnable\s*\(\s*true\s*\)\s*;)',
-                  r'\1\n    hp256g8ForcePCIActive(_pcidev);'
-              ),
-          ]
-
-          modifications = 0
-
-          for pattern, repl in patterns:
-              newc, count = re.subn(
-                  pattern,
-                  repl,
-                  c,
-                  count=1
+              c = c.replace(
+                  start_old,
+                  start_new,
+                  1
               )
 
-              if count:
-                  c = newc
-                  modifications += count
-                  break
-
+          # --------------------------------------------------------
+          # PATCH B
           #
-          # If neither call exists, insert after probe/open path.
+          # Depois de powerOn(), reafirma Bus Master + Memory.
           #
-          if modifications == 0:
-              probes = [
-                  r'(rtw_pci_probe\s*\([^;]+;)',
-                  r'(_pcidev->open\s*\([^;]+;)',
-              ]
+          # Isso é importante porque power-cycle do rádio/chip pode
+          # deixar o caminho PCI num estado diferente do start()
+          # inicial do IOKit.
+          # --------------------------------------------------------
 
-              for pattern in probes:
-                  m = re.search(pattern, c)
+          enable_old = """    IOReturn ret = _ieee80211->powerOn();
+              if (ret != kIOReturnSuccess) {
+                  IOLog("rtw88: powerOn failed (0x%08x)\\n", ret);
+                  return ret;
+              }
 
-                  if m:
-                      pos = m.end()
+              if (_txQueue) _txQueue->start();
+          """
 
-                      c = (
-                          c[:pos] +
-                          "\n    hp256g8ForcePCIActive(_pcidev);" +
-                          c[pos:]
-                      )
+          enable_new = """    IOReturn ret = _ieee80211->powerOn();
+              if (ret != kIOReturnSuccess) {
+                  IOLog("rtw88: powerOn failed (0x%08x)\\n", ret);
+                  return ret;
+              }
 
-                      modifications += 1
-                      break
+              /*
+               * HP256G8:
+               * restore PCI command state after radio power-on.
+               */
+              if (_pciDev) {
+                  _pciDev->setMemoryEnable(true);
+                  _pciDev->setBusMasterEnable(true);
 
-          if modifications == 0:
-              raise SystemExit(
-                  "ERROR: could not find PCI init path"
+                  int pcieCap = pciFindCapability(0x10);
+
+                  if (pcieCap) {
+                      UInt16 linkCtl =
+                          pciReadWord(pcieCap + 0x10);
+
+                      UInt16 newLinkCtl =
+                          (UInt16)(linkCtl & ~0x0003);
+
+                      if (newLinkCtl != linkCtl) {
+                          pciWriteWord(
+                              pcieCap + 0x10,
+                              newLinkCtl
+                          );
+                      }
+
+                      IOLog(
+                          "rtw88: HP256G8 PCI restored after "
+                          "powerOn cmd=0x%04x link=0x%04x\\n",
+                          pciReadWord(0x04),
+                          newLinkCtl
+                      );
+                  }
+              }
+
+              if (_txQueue) _txQueue->start();
+          """
+
+          if "HP256G8 PCI restored after" not in c:
+              if enable_old not in c:
+                  raise SystemExit(
+                      "ERROR: v1.0.2 enable()/powerOn block not found"
+                  )
+
+              c = c.replace(
+                  enable_old,
+                  enable_new,
+                  1
+              )
+
+          # --------------------------------------------------------
+          # PATCH C
+          #
+          # O driver já possui debugTimerFired() a cada 1 segundo.
+          # Aproveitamos esse timer apenas para detectar se Bus
+          # Master ou Memory Space desapareceram do PCI Command.
+          #
+          # PCI Command:
+          #   bit 1 = Memory Space
+          #   bit 2 = Bus Master
+          #
+          # 0x0006 = ambos ligados.
+          # --------------------------------------------------------
+
+          timer_old = """void RTW88PCIDevice::debugTimerFired(IOTimerEventSource *src)
+          {
+              unsigned int avail = rtw88_be_tx_avail();
+          """
+
+          timer_new = """void RTW88PCIDevice::debugTimerFired(IOTimerEventSource *src)
+          {
+              /*
+               * HP256G8 PCI watchdog.
+               *
+               * Do not touch PCI registers when everything is OK.
+               * Repair only if Memory Space or Bus Master disappeared.
+               */
+              if (_pciDev) {
+                  UInt16 pciCmd = pciReadWord(0x04);
+
+                  if ((pciCmd & 0x0006) != 0x0006) {
+                      IOLog(
+                          "rtw88: HP256G8 PCI command lost "
+                          "cmd=0x%04x - restoring\\n",
+                          pciCmd
+                      );
+
+                      _pciDev->setMemoryEnable(true);
+                      _pciDev->setBusMasterEnable(true);
+
+                      IOLog(
+                          "rtw88: HP256G8 PCI command restored "
+                          "cmd=0x%04x\\n",
+                          pciReadWord(0x04)
+                      );
+                  }
+              }
+
+              unsigned int avail = rtw88_be_tx_avail();
+          """
+
+          if "HP256G8 PCI watchdog" not in c:
+              if timer_old not in c:
+                  raise SystemExit(
+                      "ERROR: debugTimerFired() block not found"
+                  )
+
+              c = c.replace(
+                  timer_old,
+                  timer_new,
+                  1
               )
 
           pci.write_text(c)
 
-          print("PCI initialization patched:", modifications)
-
-          #
-          # Add extra timeout diagnostics.
-          #
-          compat = Path("src/compat/rtw88_compat.c")
-
-          if compat.exists():
-              x = compat.read_text()
-
-              needle = "pci bus timeout, check dma status"
-
-              if needle in x and "HP256G8 DMA timeout" not in x:
-                  x = x.replace(
-                      needle,
-                      "HP256G8 DMA timeout - pci bus timeout, check dma status"
-                  )
-
-                  compat.write_text(x)
-
-                  print("DMA timeout diagnostic marker added")
-
-          print("=== HP256G8 DMA stability patch applied ===")
+          print("========================================")
+          print("HP256G8 RTL8821CE DMA STABILITY V4")
+          print("========================================")
+          print("Patch applied successfully")
           PY
 
           echo
-          echo "===== VERIFY PCI PATCH ====="
+          echo "========== PATCH VERIFICATION =========="
 
           grep -n \
-            "HP256G8 PCI active" \
+            "HP256G8 PCIe ASPM disabled" \
             src/kext/RTW88PCIDevice.cpp
 
           grep -n \
-            "hp256g8ForcePCIActive" \
+            "HP256G8 PCI restored after" \
             src/kext/RTW88PCIDevice.cpp
 
+          grep -n \
+            "HP256G8 PCI watchdog" \
+            src/kext/RTW88PCIDevice.cpp
+
+          grep -n \
+            "HP256G8 PCI command lost" \
+            src/kext/RTW88PCIDevice.cpp
+
+      # ============================================================
+      # 3. rtw88 Linux compatibility source
+      # ============================================================
       - name: Clone rtw88-stable
         run: |
           git clone \
             --depth 1 \
             https://github.com/thegwchr/rtw88-stable.git
 
+      # ============================================================
+      # 4. Firmware
+      # ============================================================
       - name: Download firmware
         run: |
           cd Feixiao/firmware
@@ -249,34 +315,43 @@ jobs:
             fi
           done
 
+      # ============================================================
+      # 5. Ambiente
+      # ============================================================
       - name: Show build environment
         run: |
-          echo "===== macOS ====="
+          echo "========== macOS =========="
           sw_vers
 
           echo
-          echo "===== Xcode ====="
+          echo "========== Xcode =========="
           xcodebuild -version
 
           echo
-          echo "===== Clang ====="
+          echo "========== clang =========="
           clang --version
 
-      - name: Build HP256G8 DMA Stability
+      # ============================================================
+      # 6. Compilação
+      # ============================================================
+      - name: Build HP256G8 DMA Stability v4
         working-directory: Feixiao
         run: |
           make clean || true
 
           echo
-          echo "===================================="
-          echo "BUILDING HP256G8 DMA STABILITY V4"
-          echo "===================================="
+          echo "========================================"
+          echo " BUILD HP256G8 RTL8821CE DMA STABILITY "
+          echo "========================================"
 
           make all
 
-      - name: Verify output
+      # ============================================================
+      # 7. Verificação
+      # ============================================================
+      - name: Verify build output
         run: |
-          echo "===== Build output ====="
+          echo "========== BUILD OUTPUT =========="
 
           find \
             Feixiao/build/out \
@@ -287,18 +362,83 @@ jobs:
             -d \
             Feixiao/build/out/rtw88.kext
 
+          echo "rtw88.kext: OK"
+
           test \
             -f \
             Feixiao/build/out/rtw88ctl
 
-          echo "rtw88.kext OK"
-          echo "rtw88ctl OK"
+          echo "rtw88ctl: OK"
 
-      - name: Package HP256G8 DMA build
+          echo
+          echo "========== KEXT BINARY =========="
+
+          file \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88
+
+          echo
+          echo "========== CUSTOM STRINGS =========="
+
+          strings \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+            | grep "HP256G8" \
+            || true
+
+      # ============================================================
+      # 8. Informações da build
+      # ============================================================
+      - name: Create build information
+        run: |
+          mkdir -p \
+            "${{ runner.temp }}/Feixiao-HP256G8-DMA-v4"
+
+          cat > \
+            "${{ runner.temp }}/Feixiao-HP256G8-DMA-v4/BUILD-INFO.txt" \
+            <<'EOF'
+          Feixiao HP 256 G8 / RTL8821CE
+          ==================================
+
+          Base:
+          Feixiao v1.0.2
+
+          Target hardware:
+          HP 256 G8
+          Realtek RTL8821CE
+          PCI ID 10EC:C821
+
+          Purpose:
+          Investigate/fix:
+          "pci bus timeout, check dma status"
+
+          Changes:
+          - preserve v1.0.2 Wi-Fi connection path
+          - no HT40/VHT80 experimental patch
+          - no newer A-MPDU/A-MSDU patch
+          - PCI Memory Space enabled
+          - PCI Bus Master enabled
+          - PCIe ASPM L0s disabled
+          - PCIe ASPM L1 disabled
+          - PCI state restored after Wi-Fi powerOn()
+          - watchdog checks PCI Command register
+          - watchdog repairs Memory/BusMaster only if lost
+
+          Test priority:
+          1. connection stability
+          2. PCI/DMA timeout disappearance
+          3. sustained download/upload
+          4. only then optimize Wi-Fi throughput
+
+          IMPORTANT:
+          Experimental kernel driver.
+          Keep the known-working v1.0.2 backup.
+          EOF
+
+      # ============================================================
+      # 9. Empacotar
+      # ============================================================
+      - name: Package HP256G8 DMA v4
         run: |
           OUT="${{ runner.temp }}/Feixiao-HP256G8-DMA-v4"
-
-          mkdir -p "$OUT"
 
           cp -R \
             Feixiao/build/out/rtw88.kext \
@@ -308,33 +448,8 @@ jobs:
             Feixiao/build/out/rtw88ctl \
             "$OUT/"
 
-          chmod +x "$OUT/rtw88ctl"
-
-          cat > "$OUT/BUILD-INFO.txt" <<'EOF'
-          Feixiao HP 256 G8 / RTL8821CE
-
-          Base:
-          Feixiao v1.0.2
-
-          Goal:
-          PCIe / DMA stability
-
-          Changes:
-          - no HT40/VHT80 experimental patch
-          - no newer A-MPDU/A-MSDU changes
-          - force PCI device memory access enabled
-          - force PCI bus mastering enabled
-          - attempt to keep PCI device in active state
-          - additional PCI/DMA diagnostic marker
-
-          Target problem:
-          repeated:
-          pci bus timeout, check dma status
-
-          IMPORTANT:
-          Experimental build.
-          Keep working v1.0.2 backup.
-          EOF
+          chmod +x \
+            "$OUT/rtw88ctl"
 
           cd "${{ runner.temp }}"
 
@@ -343,7 +458,10 @@ jobs:
             Feixiao_HP256G8_DMA_v4.zip \
             Feixiao-HP256G8-DMA-v4
 
-      - name: Upload HP256G8 DMA driver
+      # ============================================================
+      # 10. Upload
+      # ============================================================
+      - name: Upload HP256G8 DMA v4
         uses: actions/upload-artifact@v4
         with:
           name: Feixiao-HP256G8-DMA-v4
