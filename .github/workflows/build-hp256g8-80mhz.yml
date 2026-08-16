@@ -17,12 +17,144 @@ jobs:
           path: Feixiao
           fetch-depth: 0
 
-      - name: Apply 40/80 MHz patch
+      - name: Apply HP256G8 40/80 MHz compatibility patch
         working-directory: Feixiao
         run: |
-          git config user.email "actions@github.com"
-          git config user.name "GitHub Actions"
-          git cherry-pick fcc97df
+          python3 <<'PY'
+          from pathlib import Path
+
+          cpp = Path("src/kext/RTW88IEEE80211.cpp")
+          hpp = Path("src/kext/RTW88IEEE80211.hpp")
+
+          c = cpp.read_text()
+          h = hpp.read_text()
+
+          # 1) Add current channel-width state
+          marker = "struct rtw_sta_info *_si = nullptr;"
+          if marker in h and "_connChanWidth" not in h:
+              h = h.replace(
+                  marker,
+                  marker + "\n    uint32_t _connChanWidth = 20;"
+              )
+
+          # 2) Declare helper method
+          marker2 = "void restoreConnectedChannel();"
+          if marker2 in h and "setConnectedChandef" not in h:
+              h = h.replace(
+                  marker2,
+                  marker2 + "\n    void setConnectedChandef(struct ieee80211_channel *chan);"
+              )
+
+          # 3) Add 20/40/80 MHz channel negotiation
+          insert_before = "void RTW88IEEE80211::restoreConnectedChannel()"
+
+          if insert_before in c and "setConnectedChandef(struct ieee80211_channel" not in c:
+              func = r'''
+          void RTW88IEEE80211::setConnectedChandef(struct ieee80211_channel *chan)
+          {
+              _hw->conf.chandef.chan = chan;
+              _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20_NOHT;
+              _hw->conf.chandef.center_freq1 = chan->center_freq;
+              _connChanWidth = 20;
+
+              if (!htAllowed())
+                  return;
+
+              enum nl80211_band bnd =
+                  (_targetBSS.channel > 14)
+                      ? NL80211_BAND_5GHZ
+                      : NL80211_BAND_2GHZ;
+
+              struct ieee80211_supported_band *sb =
+                  (_hw->wiphy) ? _hw->wiphy->bands[bnd] : nullptr;
+
+              if (!sb)
+                  return;
+
+              bool chip40 =
+                  (sb->ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40) != 0;
+
+              bool chip80 =
+                  chip40 &&
+                  bnd == NL80211_BAND_5GHZ &&
+                  sb->vht_cap.vht_supported;
+
+              int sco = 0;
+              bool htStaWidth = false;
+              int vhtWidth = 0;
+              uint8_t vhtSeg0 = 0;
+
+              const uint8_t *ies = _targetBSS.ies;
+              uint16_t ielen = _targetBSS.ies_len;
+
+              for (uint16_t i = 0; i + 2 <= ielen;) {
+                  uint8_t id = ies[i];
+                  uint8_t len = ies[i + 1];
+
+                  if ((uint32_t)i + 2 + len > ielen)
+                      break;
+
+                  const uint8_t *d = ies + i + 2;
+
+                  if (id == WLAN_EID_HT_OPERATION && len >= 2) {
+                      sco = d[1] & 0x03;
+                      htStaWidth = (d[1] & 0x04) != 0;
+                  }
+                  else if (id == WLAN_EID_VHT_OPERATION && len >= 3) {
+                      vhtWidth = d[0];
+                      vhtSeg0 = d[1];
+                  }
+
+                  i += 2 + len;
+              }
+
+              if (chip40 && htStaWidth && (sco == 1 || sco == 3)) {
+                  _connChanWidth = 40;
+                  _hw->conf.chandef.width = NL80211_CHAN_WIDTH_40;
+                  _hw->conf.chandef.center_freq1 =
+                      (uint32_t)(
+                          (int)chan->center_freq +
+                          (sco == 1 ? 10 : -10)
+                      );
+              }
+
+              if (chip80 && vhtWidth == 1 && vhtSeg0 != 0) {
+                  _connChanWidth = 80;
+                  _hw->conf.chandef.width = NL80211_CHAN_WIDTH_80;
+                  _hw->conf.chandef.center_freq1 =
+                      (uint32_t)(5000 + 5 * vhtSeg0);
+              }
+
+              IOLog(
+                  "rtw88: HP256G8 chandef: %u MHz primary=%u cf1=%u\n",
+                  _connChanWidth,
+                  chan->center_freq,
+                  _hw->conf.chandef.center_freq1
+              );
+          }
+
+          '''
+              c = c.replace(insert_before, func + insert_before)
+
+          # 4) Replace fixed 20 MHz blocks with our helper
+          old = """_hw->conf.chandef.chan = chan;
+              _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20_NOHT;
+              _hw->conf.chandef.center_freq1 = chan->center_freq;"""
+
+          replacements = c.count(old)
+          c = c.replace(old, "setConnectedChandef(chan);")
+
+          cpp.write_text(c)
+          hpp.write_text(h)
+
+          print("HP256G8 40/80 MHz patch applied")
+          print("20 MHz blocks replaced:", replacements)
+          PY
+
+          echo "=== Verifying patch ==="
+          grep -n "HP256G8 chandef" src/kext/RTW88IEEE80211.cpp
+          grep -n "_connChanWidth" src/kext/RTW88IEEE80211.hpp || true
+          grep -n "setConnectedChandef" src/kext/RTW88IEEE80211.hpp || true
 
       - name: Clone rtw88-stable
         run: |
@@ -31,30 +163,67 @@ jobs:
       - name: Download firmware
         run: |
           cd Feixiao/firmware
-          for fw in rtw8822b_fw.bin rtw8822c_fw.bin rtw8821c_fw.bin \
-                    rtw8821a_fw.bin rtw8812a_fw.bin rtw8814a_fw.bin; do
+
+          for fw in \
+            rtw8822b_fw.bin \
+            rtw8822c_fw.bin \
+            rtw8821c_fw.bin \
+            rtw8821a_fw.bin \
+            rtw8812a_fw.bin \
+            rtw8814a_fw.bin
+          do
             if [ ! -s "$fw" ]; then
-              curl -sLO "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw"
+              echo "Downloading $fw"
+              curl -L --fail \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
+                -o "$fw"
             fi
           done
 
-      - name: Build
+      - name: Show build environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          clang --version
+
+      - name: Build custom Feixiao
         working-directory: Feixiao
         run: |
+          make clean || true
           make all
 
-      - name: Show commit
-        working-directory: Feixiao
+      - name: Verify build output
         run: |
-          git log -3 --oneline
+          echo "=== Build output ==="
+          find Feixiao/build/out -maxdepth 2 -print
 
-      - name: Package
+          test -d Feixiao/build/out/rtw88.kext
+          test -f Feixiao/build/out/rtw88ctl
+
+      - name: Package HP256G8 build
         run: |
-          cd Feixiao/build/out
-          zip -r "${{ runner.temp }}/Feixiao_HP256G8_80MHz_Test.zip" rtw88.kext rtw88ctl
+          mkdir -p "${{ runner.temp }}/Feixiao-HP256G8-80MHz"
 
-      - name: Upload
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "${{ runner.temp }}/Feixiao-HP256G8-80MHz/"
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "${{ runner.temp }}/Feixiao-HP256G8-80MHz/"
+
+          chmod +x \
+            "${{ runner.temp }}/Feixiao-HP256G8-80MHz/rtw88ctl"
+
+          cd "${{ runner.temp }}"
+
+          zip -r \
+            Feixiao_HP256G8_80MHz_Test.zip \
+            Feixiao-HP256G8-80MHz
+
+      - name: Upload custom driver
         uses: actions/upload-artifact@v4
         with:
           name: Feixiao-HP256G8-80MHz-Test
           path: ${{ runner.temp }}/Feixiao_HP256G8_80MHz_Test.zip
+          retention-days: 7
