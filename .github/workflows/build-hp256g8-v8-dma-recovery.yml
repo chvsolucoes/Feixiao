@@ -1,0 +1,1512 @@
+name: Build HP256G8 RTL8821CE v8 DMA Recovery
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Feixiao
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: e963f43188382eced4ef2fa75d19ce4db2315c68
+          submodules: recursive
+          path: Feixiao
+          fetch-depth: 0
+
+      - name: Clone matching rtw88-stable
+        run: |
+          git clone https://github.com/thegwchr/rtw88-stable.git
+          cd rtw88-stable
+          git checkout d029a677c49266fad86750714eb5612becd134d3
+          git rev-parse HEAD
+
+      - name: Apply HP256G8 v8 patches
+        shell: bash
+        run: |
+          cat > /tmp/patch_v8.py <<'PY'
+          from pathlib import Path
+
+          feixiao = Path("Feixiao")
+          ieee = feixiao / "src/kext/RTW88IEEE80211.cpp"
+          pci = feixiao / "src/kext/RTW88PCIDevice.cpp"
+          hpp = feixiao / "src/kext/RTW88PCIDevice.hpp"
+          compat = feixiao / "src/compat/rtw88_compat.c"
+
+          linux_pci = Path(
+              "rtw88-stable/"
+              "drivers/net/wireless/realtek/rtw88/pci.c"
+          )
+
+          for f in (
+              ieee,
+              pci,
+              hpp,
+              compat,
+              linux_pci,
+          ):
+              if not f.exists():
+                  raise SystemExit(
+                      f"ERROR: required source missing: {f}"
+                  )
+
+          c = ieee.read_text()
+          p = pci.read_text()
+          h = hpp.read_text()
+          r = compat.read_text()
+          lp = linux_pci.read_text()
+
+          print("=" * 72)
+          print("HP256G8 RTL8821CE v8 DMA RECOVERY")
+          print("=" * 72)
+
+          # ============================================================
+          # 1. VERIFY NATIVE DMA/TX CORRECTNESS FIXES
+          # ============================================================
+
+          if "IOGatedOutputQueue::withTarget" not in p:
+              raise SystemExit(
+                  "ERROR: native IOGatedOutputQueue fix missing"
+              )
+
+          if "drainPendingFree()" not in p:
+              raise SystemExit(
+                  "ERROR: deferred DMA free fix missing"
+              )
+
+          print("Native TX serialization: OK")
+          print("Deferred DMA free: OK")
+
+          # ============================================================
+          # 2. NEVER USE LEGACY FIXED 6 MBPS 5 GHZ RATE
+          # ============================================================
+
+          r = r.replace(
+              "rtwdev->dm_info.fix_rate = DESC_RATE6M;",
+              "rtwdev->dm_info.fix_rate = 0xFF;"
+          )
+
+          print("Firmware automatic rate adaptation: OK")
+
+          # ============================================================
+          # 3. RETAIN V7 WPA2:
+          #    M4 RSN KEY LENGTH = 0
+          # ============================================================
+
+          old_keylen = (
+              "    key[3] = 0; key[4] = 16; "
+              "/* key length = 16 (AES-128) */"
+          )
+
+          new_keylen = """    if (step == 4) {
+              key[3] = 0;
+              key[4] = 0;
+
+              IOLog(
+                  "rtw88: HP256G8 v8 M4 key_length=0\\n"
+              );
+          } else {
+              key[3] = 0;
+              key[4] = 16;
+          }"""
+
+          if "HP256G8 v8 M4 key_length=0" not in c:
+
+              if old_keylen not in c:
+                  raise SystemExit(
+                      "ERROR: EAPOL key-length "
+                      "assignment not found"
+                  )
+
+              c = c.replace(
+                  old_keylen,
+                  new_keylen,
+                  1
+              )
+
+          print("WPA2 M4 Key Length: OK")
+
+          # ============================================================
+          # 4. RETAIN V7 WPA2:
+          #    M4 KEY NONCE = ZERO
+          # ============================================================
+
+          old_nonce = (
+              "    memcpy(key + 13, _snonce, 32);       "
+              "/* key[13..44] = SNonce */"
+          )
+
+          new_nonce = """    if (step == 4) {
+              memset(
+                  key + 13,
+                  0,
+                  32
+              );
+
+              IOLog(
+                  "rtw88: HP256G8 v8 M4 nonce zeroed\\n"
+              );
+          } else {
+              memcpy(
+                  key + 13,
+                  _snonce,
+                  32
+              );
+          }"""
+
+          if "HP256G8 v8 M4 nonce zeroed" not in c:
+
+              if old_nonce not in c:
+                  raise SystemExit(
+                      "ERROR: EAPOL nonce "
+                      "assignment not found"
+                  )
+
+              c = c.replace(
+                  old_nonce,
+                  new_nonce,
+                  1
+              )
+
+          print("WPA2 M4 nonce: OK")
+
+          # ============================================================
+          # 5. M3 DIAGNOSTICS
+          # ============================================================
+
+          m3_marker = (
+              "    } else if (is_m3) {"
+          )
+
+          if "HP256G8 v8 received M3" not in c:
+
+              if m3_marker not in c:
+                  raise SystemExit(
+                      "ERROR: M3 handler not found"
+                  )
+
+              c = c.replace(
+                  m3_marker,
+                  """    } else if (is_m3) {
+
+              IOLog(
+                  "rtw88: HP256G8 v8 received M3 "
+                  "replay=%02x%02x%02x%02x"
+                  "%02x%02x%02x%02x\\n",
+                  data[9],
+                  data[10],
+                  data[11],
+                  data[12],
+                  data[13],
+                  data[14],
+                  data[15],
+                  data[16]
+              );""",
+                  1
+              )
+
+          print("WPA2 M3 diagnostics: OK")
+
+          # ============================================================
+          # 6. RETAIN V7:
+          #    SEND M4 BEFORE INSTALLING PTK/GTK
+          # ============================================================
+
+          if (
+              "HP256G8 v8 sending EAPOL M4 "
+              "before PTK install"
+              not in c
+          ):
+
+              m3_start = c.find(
+                  "HP256G8 v8 received M3"
+              )
+
+              ptk_anchor = (
+                  "if (!installKey("
+                  "&_ptkConf, "
+                  "true, "
+                  "0, "
+                  "WLAN_CIPHER_SUITE_CCMP,"
+              )
+
+              m4_anchor = (
+                  "sendEAPOLKey("
+                  "4, "
+                  "_replayCtr, "
+                  "false, "
+                  "false, "
+                  "true);"
+              )
+
+              state_anchor = (
+                  "_state = "
+                  "RTW88_STATE_CONNECTED;"
+              )
+
+              if m3_start < 0:
+                  raise SystemExit(
+                      "ERROR: patched M3 region not found"
+                  )
+
+              start = c.find(
+                  ptk_anchor,
+                  m3_start
+              )
+
+              if start < 0:
+                  raise SystemExit(
+                      "ERROR: PTK install anchor not found"
+                  )
+
+              send4 = c.find(
+                  m4_anchor,
+                  start
+              )
+
+              if send4 < 0:
+                  raise SystemExit(
+                      "ERROR: EAPOL M4 anchor not found"
+                  )
+
+              end = c.find(
+                  state_anchor,
+                  send4
+              )
+
+              if end < 0:
+                  raise SystemExit(
+                      "ERROR: CONNECTED state anchor not found"
+                  )
+
+              end += len(
+                  state_anchor
+              )
+
+              old_block = c[
+                  start:end
+              ]
+
+              if (
+                  "installKey(&_gtkConf"
+                  not in old_block
+              ):
+                  raise SystemExit(
+                      "ERROR: WPA2 block lacks GTK install"
+                  )
+
+              new_block = """IOLog(
+              "rtw88: HP256G8 v8 "
+              "sending EAPOL M4 before PTK install\\n"
+          );
+
+          sendEAPOLKey(
+              4,
+              _replayCtr,
+              false,
+              false,
+              true
+          );
+
+          /*
+           * M4 goes through the serialized TX path.
+           * Allow it to enter hardware before CCMP
+           * pairwise encryption becomes active.
+           */
+
+          IOSleep(
+              40
+          );
+
+          IOLog(
+              "rtw88: HP256G8 v8 "
+              "M4 submitted, installing PTK\\n"
+          );
+
+          if (!installKey(
+                  &_ptkConf,
+                  true,
+                  0,
+                  WLAN_CIPHER_SUITE_CCMP,
+                  _ptk + 32,
+                  16))
+              return;
+
+          uint32_t groupCipher =
+              (
+                  _targetBSS.group_cipher ==
+                  WLAN_CIPHER_SUITE_TKIP
+              )
+              ?
+              WLAN_CIPHER_SUITE_TKIP
+              :
+              WLAN_CIPHER_SUITE_CCMP;
+
+          if (
+              gtk_len &&
+              !installKey(
+                  &_gtkConf,
+                  false,
+                  gtk_idx,
+                  groupCipher,
+                  gtk,
+                  gtk_len
+              )
+          )
+              return;
+
+          IOLog(
+              "rtw88: HP256G8 v8 "
+              "PTK/GTK installed after M4\\n"
+          );
+
+          _state =
+              RTW88_STATE_CONNECTED;"""
+
+              c = (
+                  c[:start]
+                  +
+                  new_block
+                  +
+                  c[end:]
+              )
+
+          print("WPA2 M4/PTK/GTK ordering: OK")
+
+          # ============================================================
+          # 7. RETAIN V7:
+          #    START A-MPDU AFTER WPA2 SETTLES
+          # ============================================================
+
+          old_ampdu = (
+              "        startTxAggregation();   "
+              "/* keys are installed — "
+              "negotiate uplink A-MPDU */"
+          )
+
+          if (
+              "HP256G8 v8 WPA2 settle complete"
+              not in c
+          ):
+
+              if old_ampdu not in c:
+                  raise SystemExit(
+                      "ERROR: WPA2 A-MPDU "
+                      "start line not found"
+                  )
+
+              c = c.replace(
+                  old_ampdu,
+                  """        IOSleep(
+              100
+          );
+
+          IOLog(
+              "rtw88: HP256G8 v8 "
+              "WPA2 settle complete, "
+              "starting A-MPDU\\n"
+          );
+
+          startTxAggregation();""",
+                  1
+              )
+
+          print("A-MPDU WPA2 settle: OK")
+
+          # ============================================================
+          # 8. ENABLE 80 MHz AGAIN
+          #
+          # v7 deliberately capped to 40 MHz.
+          # v8 re-enables the original VHT80 path.
+          # ============================================================
+
+          disabled80 = (
+              "if (false && chip80 && "
+              "vhtWidth == 1 && "
+              "vhtSeg0 != 0) {"
+          )
+
+          enabled80 = (
+              "if (chip80 && "
+              "vhtWidth == 1 && "
+              "vhtSeg0 != 0) {"
+          )
+
+          if disabled80 in c:
+              c = c.replace(
+                  disabled80,
+                  enabled80,
+                  1
+              )
+
+          if enabled80 not in c:
+              raise SystemExit(
+                  "ERROR: VHT80 negotiation "
+                  "path not found"
+              )
+
+          print("VHT 80 MHz: ENABLED")
+
+          # ============================================================
+          # 9. V8 BUILD IDENTIFICATION
+          # ============================================================
+
+          chandef_log = (
+              '    IOLog('
+              '"rtw88: connected chandef: '
+              '%u MHz '
+              '(primary=%u cf1=%u)\\n",'
+          )
+
+          if (
+              "HP256G8 v8 DMA Recovery active"
+              not in c
+          ):
+
+              if chandef_log not in c:
+                  raise SystemExit(
+                      "ERROR: chandef log marker not found"
+                  )
+
+              c = c.replace(
+                  chandef_log,
+
+                  '    IOLog('
+                  '"rtw88: HP256G8 v8 '
+                  'DMA Recovery active\\n");\n'
+                  +
+                  chandef_log,
+
+                  1
+              )
+
+          # ============================================================
+          # 10. TX FLOW CONTROL
+          #
+          # v7:
+          #     stall  = 128
+          #     resume = 192
+          #
+          # That is intentionally very conservative but
+          # can keep the macOS output queue stalled too long.
+          #
+          # Restore Feixiao's native values:
+          #
+          #     96 / 160
+          # ============================================================
+
+          p = p.replace(
+              "static constexpr unsigned int "
+              "kRTW88TxStallAvail = 128;",
+
+              "static constexpr unsigned int "
+              "kRTW88TxStallAvail = 96;"
+          )
+
+          p = p.replace(
+              "static constexpr unsigned int "
+              "kRTW88TxResumeAvail = 192;",
+
+              "static constexpr unsigned int "
+              "kRTW88TxResumeAvail = 160;"
+          )
+
+          if (
+              "kRTW88TxStallAvail = 96;"
+              not in p
+          ):
+              raise SystemExit(
+                  "ERROR: TX stall threshold "
+                  "not restored"
+              )
+
+          if (
+              "kRTW88TxResumeAvail = 160;"
+              not in p
+          ):
+              raise SystemExit(
+                  "ERROR: TX resume threshold "
+                  "not restored"
+              )
+
+          print("TX thresholds 96/160: OK")
+
+          # ============================================================
+          # 11. RX BATCHING HEADER
+          # ============================================================
+
+          if (
+              "void flushRxQueue();"
+              not in h
+          ):
+
+              anchor = (
+                  "    void injectRxFrame(mbuf_t m);"
+              )
+
+              if anchor not in h:
+                  raise SystemExit(
+                      "ERROR: injectRxFrame "
+                      "declaration not found"
+                  )
+
+              h = h.replace(
+                  anchor,
+
+                  anchor
+                  +
+                  "\n"
+                  "    void flushRxQueue();",
+
+                  1
+              )
+
+          if (
+              "_rxQueued"
+              not in h
+          ):
+
+              anchor = (
+                  "    IOEthernetInterface    "
+                  "*_iface        = nullptr;"
+              )
+
+              if anchor not in h:
+                  raise SystemExit(
+                      "ERROR: _iface member "
+                      "not found"
+                  )
+
+              h = h.replace(
+                  anchor,
+
+                  anchor
+                  +
+                  "\n"
+                  "    bool                    "
+                  "_rxQueued     = false;",
+
+                  1
+              )
+
+          # ============================================================
+          # 12. RX BATCHING:
+          #     FLUSH ONCE AFTER INTERRUPT PROCESSING
+          # ============================================================
+
+          old_irq = """void RTW88PCIDevice::handleInterrupt(IOInterruptEventSource *src, int count)
+          {
+              if (_ieee80211)
+                  rtw88_trigger_interrupt();
+          }"""
+
+          new_irq = """void RTW88PCIDevice::handleInterrupt(IOInterruptEventSource *src, int count)
+          {
+              if (_ieee80211)
+                  rtw88_trigger_interrupt();
+
+              /*
+               * HP256G8 v8:
+               * submit all frames from this RX interrupt
+               * to the macOS input stack in one batch.
+               */
+              flushRxQueue();
+          }"""
+
+          if (
+              "submit all frames from this RX interrupt"
+              not in p
+          ):
+
+              if old_irq not in p:
+                  raise SystemExit(
+                      "ERROR: handleInterrupt "
+                      "block not found"
+                  )
+
+              p = p.replace(
+                  old_irq,
+                  new_irq,
+                  1
+              )
+
+          # ============================================================
+          # 13. RX BATCHING:
+          #     QUEUE FRAME WITHOUT PER-PACKET FLUSH
+          # ============================================================
+
+          old_inject = """    /* Queue + flush, matching the proven itlwm submission path.  Submitting
+               * via the input queue keeps frame delivery off whatever thread called us. */
+              _iface->inputPacket(m, 0, IONetworkInterface::kInputOptionQueuePacket);
+              _iface->flushInputQueue();"""
+
+          new_inject = """    /*
+               * HP256G8 v8:
+               * queue the frame now.
+               * handleInterrupt() flushes the whole RX poll.
+               */
+              _iface->inputPacket(
+                  m,
+                  0,
+                  IONetworkInterface::kInputOptionQueuePacket
+              );
+
+              _rxQueued = true;"""
+
+          if (
+              "handleInterrupt() flushes "
+              "the whole RX poll"
+              not in p
+          ):
+
+              if old_inject not in p:
+                  raise SystemExit(
+                      "ERROR: injectRxFrame "
+                      "queue/flush block not found"
+                  )
+
+              p = p.replace(
+                  old_inject,
+                  new_inject,
+                  1
+              )
+
+          # ============================================================
+          # 14. RX BATCH FLUSH IMPLEMENTATION
+          # ============================================================
+
+          if (
+              "void RTW88PCIDevice::flushRxQueue()"
+              not in p
+          ):
+
+              insert_before = (
+                  "/* ------------------------------------------------------------------ */\n"
+                  "/*  DMA coherent allocation"
+              )
+
+              if insert_before not in p:
+                  raise SystemExit(
+                      "ERROR: DMA allocation "
+                      "section marker not found"
+                  )
+
+              flush_impl = """void RTW88PCIDevice::flushRxQueue()
+          {
+              if (
+                  _rxQueued
+                  &&
+                  _iface
+              ) {
+                  _rxQueued = false;
+                  _iface->flushInputQueue();
+              }
+          }
+
+          """
+
+              p = p.replace(
+                  insert_before,
+
+                  flush_impl
+                  +
+                  insert_before,
+
+                  1
+              )
+
+          print("macOS RX batching: OK")
+
+          # ============================================================
+          # 15. RTW88 RX DMA COMPLETION-TAG RECOVERY
+          #
+          # The original function immediately reads:
+          #
+          #     total_pkt_size
+          #
+          # and compares it against:
+          #
+          #     rtwpci->rx_tag
+          #
+          # A mismatch prints:
+          #
+          #     pci bus timeout, check dma status
+          #
+          #
+          # v8:
+          #
+          # 1. waits up to 200 us for DMA descriptor visibility;
+          #
+          # 2. if it remains mismatched, synchronize the expected
+          #    sequence with the hardware-observed completion tag;
+          #
+          # 3. warning is rate limited so one offset cannot flood
+          #    dmesg for every packet.
+          # ============================================================
+
+          old_dma_check = """static void rtw_pci_dma_check(struct rtw_dev *rtwdev,
+                                      struct rtw_pci_rx_ring *rx_ring,
+                                      u32 idx)
+          {
+              struct rtw_pci *rtwpci = (struct rtw_pci *)rtwdev->priv;
+              const struct rtw_chip_info *chip = rtwdev->chip;
+              struct rtw_pci_rx_buffer_desc *buf_desc;
+              u32 desc_sz = chip->rx_buf_desc_sz;
+              u16 total_pkt_size;
+
+              buf_desc = (struct rtw_pci_rx_buffer_desc *)(rx_ring->r.head +
+                                                           idx * desc_sz);
+              total_pkt_size = le16_to_cpu(buf_desc->total_pkt_size);
+
+              /* rx tag mismatch, throw a warning */
+              if (total_pkt_size != rtwpci->rx_tag)
+                  rtw_warn(rtwdev, "pci bus timeout, check dma status\\n");
+
+              rtwpci->rx_tag = (rtwpci->rx_tag + 1) % RX_TAG_MAX;
+          }"""
+
+          new_dma_check = """static void rtw_pci_dma_check(struct rtw_dev *rtwdev,
+                                      struct rtw_pci_rx_ring *rx_ring,
+                                      u32 idx)
+          {
+              struct rtw_pci *rtwpci =
+                  (struct rtw_pci *)rtwdev->priv;
+
+              const struct rtw_chip_info *chip =
+                  rtwdev->chip;
+
+              struct rtw_pci_rx_buffer_desc *buf_desc;
+
+              u32 desc_sz =
+                  chip->rx_buf_desc_sz;
+
+              u16 total_pkt_size = 0;
+              u16 expected = rtwpci->rx_tag;
+
+              int i;
+
+              static u32 mismatch_count;
+
+              buf_desc =
+                  (struct rtw_pci_rx_buffer_desc *)
+                  (
+                      rx_ring->r.head
+                      +
+                      idx * desc_sz
+                  );
+
+              /*
+               * HP256G8 v8 DMA recovery.
+               *
+               * RX WP can become visible before the
+               * coherent descriptor completion tag.
+               *
+               * Wait for the expected tag before
+               * consuming the descriptor.
+               *
+               * 100 x 2 us = maximum 200 us.
+               */
+
+              for (
+                  i = 0;
+                  i < 100;
+                  i++
+              ) {
+
+                  total_pkt_size =
+                      le16_to_cpu(
+                          READ_ONCE(
+                              buf_desc->total_pkt_size
+                          )
+                      );
+
+                  if (
+                      total_pkt_size ==
+                      expected
+                  )
+                      break;
+
+                  udelay(
+                      2
+                  );
+              }
+
+              if (
+                  total_pkt_size !=
+                  expected
+              ) {
+
+                  /*
+                   * If one tag is missed, simply incrementing
+                   * the old expected value keeps host/device
+                   * permanently out of phase.
+                   *
+                   * Rebase the expected sequence on the tag
+                   * actually completed by hardware.
+                   */
+
+                  mismatch_count++;
+
+                  if (
+                      mismatch_count == 1
+                      ||
+                      (
+                          mismatch_count
+                          &
+                          0xff
+                      )
+                      ==
+                      0
+                  ) {
+
+                      rtw_warn(
+                          rtwdev,
+
+                          "HP256G8 v8 RX tag resync "
+                          "expected=%u observed=%u count=%u\\n",
+
+                          expected,
+                          total_pkt_size,
+                          mismatch_count
+                      );
+                  }
+
+                  rtwpci->rx_tag =
+                      total_pkt_size;
+              }
+
+              rtwpci->rx_tag =
+                  (
+                      rtwpci->rx_tag
+                      +
+                      1
+                  )
+                  %
+                  RX_TAG_MAX;
+          }"""
+
+          if (
+              "HP256G8 v8 RX tag resync"
+              not in lp
+          ):
+
+              if old_dma_check not in lp:
+                  raise SystemExit(
+                      "ERROR: exact "
+                      "rtw_pci_dma_check "
+                      "block not found"
+                  )
+
+              lp = lp.replace(
+                  old_dma_check,
+                  new_dma_check,
+                  1
+              )
+
+          print("RX DMA tag recovery: OK")
+
+          # ============================================================
+          # 16. FINAL IEEE/WPA2 VALIDATION
+          # ============================================================
+
+          required_c = [
+
+              "HP256G8 v8 DMA Recovery active",
+
+              "HP256G8 v8 received M3",
+
+              "HP256G8 v8 M4 key_length=0",
+
+              "HP256G8 v8 M4 nonce zeroed",
+
+              "HP256G8 v8 sending EAPOL M4 "
+              "before PTK install",
+
+              "HP256G8 v8 M4 submitted, "
+              "installing PTK",
+
+              "HP256G8 v8 PTK/GTK installed "
+              "after M4",
+
+              "HP256G8 v8 WPA2 settle complete",
+
+          ]
+
+          for marker in required_c:
+
+              if marker not in c:
+                  raise SystemExit(
+                      "ERROR: missing v8 IEEE marker: "
+                      f"{marker}"
+                  )
+
+          # ============================================================
+          # 17. FINAL RX BATCH VALIDATION
+          # ============================================================
+
+          if (
+              "submit all frames from this RX interrupt"
+              not in p
+          ):
+              raise SystemExit(
+                  "ERROR: RX interrupt batch flush missing"
+              )
+
+          if (
+              "handleInterrupt() flushes "
+              "the whole RX poll"
+              not in p
+          ):
+              raise SystemExit(
+                  "ERROR: RX batch enqueue missing"
+              )
+
+          if (
+              "void RTW88PCIDevice::flushRxQueue()"
+              not in p
+          ):
+              raise SystemExit(
+                  "ERROR: flushRxQueue "
+                  "implementation missing"
+              )
+
+          if (
+              "void flushRxQueue();"
+              not in h
+          ):
+              raise SystemExit(
+                  "ERROR: flushRxQueue "
+                  "header declaration missing"
+              )
+
+          if (
+              "_rxQueued"
+              not in h
+          ):
+              raise SystemExit(
+                  "ERROR: _rxQueued "
+                  "header member missing"
+              )
+
+          # ============================================================
+          # 18. FINAL TX VALIDATION
+          # ============================================================
+
+          if (
+              "kRTW88TxStallAvail = 96;"
+              not in p
+          ):
+              raise SystemExit(
+                  "ERROR: TX stall threshold "
+                  "incorrect"
+              )
+
+          if (
+              "kRTW88TxResumeAvail = 160;"
+              not in p
+          ):
+              raise SystemExit(
+                  "ERROR: TX resume threshold "
+                  "incorrect"
+              )
+
+          # ============================================================
+          # 19. FINAL DMA VALIDATION
+          # ============================================================
+
+          if (
+              "HP256G8 v8 RX tag resync"
+              not in lp
+          ):
+              raise SystemExit(
+                  "ERROR: RX tag recovery "
+                  "patch missing"
+              )
+
+          if (
+              "i < 100"
+              not in lp
+          ):
+              raise SystemExit(
+                  "ERROR: RX DMA wait loop missing"
+              )
+
+          if (
+              "udelay("
+              not in lp
+          ):
+              raise SystemExit(
+                  "ERROR: RX DMA wait delay missing"
+              )
+
+          # ============================================================
+          # 20. WRITE PATCHED SOURCES
+          # ============================================================
+
+          ieee.write_text(
+              c
+          )
+
+          pci.write_text(
+              p
+          )
+
+          hpp.write_text(
+              h
+          )
+
+          compat.write_text(
+              r
+          )
+
+          linux_pci.write_text(
+              lp
+          )
+
+          print()
+          print("=" * 72)
+          print("WPA2 v7 fixes retained: OK")
+          print("VHT 80 MHz enabled: OK")
+          print("TX thresholds 96/160: OK")
+          print("RX batching: OK")
+          print("RX DMA tag wait/resync: OK")
+          print(
+              "HP256G8 v8 SOURCE PATCH "
+              "APPLIED SUCCESSFULLY"
+          )
+          print("=" * 72)
+
+          PY
+
+          python3 /tmp/patch_v8.py
+
+          echo
+          echo "========================================"
+          echo " VERIFY FEIXIAO V8 "
+          echo "========================================"
+
+          grep -n \
+            "HP256G8 v8" \
+            Feixiao/src/kext/RTW88IEEE80211.cpp
+
+          echo
+          echo "========================================"
+          echo " VERIFY RX BATCH "
+          echo "========================================"
+
+          grep -n \
+            "flushRxQueue" \
+            Feixiao/src/kext/RTW88PCIDevice.cpp
+
+          grep -n \
+            "_rxQueued" \
+            Feixiao/src/kext/RTW88PCIDevice.hpp
+
+          echo
+          echo "========================================"
+          echo " VERIFY TX FLOW CONTROL "
+          echo "========================================"
+
+          grep -n \
+            "kRTW88TxStallAvail" \
+            Feixiao/src/kext/RTW88PCIDevice.cpp
+
+          grep -n \
+            "kRTW88TxResumeAvail" \
+            Feixiao/src/kext/RTW88PCIDevice.cpp
+
+          echo
+          echo "========================================"
+          echo " VERIFY VHT80 "
+          echo "========================================"
+
+          grep -n \
+            "chip80 && vhtWidth == 1" \
+            Feixiao/src/kext/RTW88IEEE80211.cpp
+
+          echo
+          echo "========================================"
+          echo " VERIFY RTW88-STABLE DMA RECOVERY "
+          echo "========================================"
+
+          grep -n \
+            -A 65 \
+            -B 10 \
+            "HP256G8 v8 RX tag resync" \
+            rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+
+
+      # ============================================================
+      # 4. DOWNLOAD FIRMWARE
+      # ============================================================
+
+      - name: Download firmware
+        run: |
+
+          cd Feixiao/firmware
+
+          for fw in \
+            rtw8822b_fw.bin \
+            rtw8822c_fw.bin \
+            rtw8821c_fw.bin \
+            rtw8821a_fw.bin \
+            rtw8812a_fw.bin \
+            rtw8814a_fw.bin
+
+          do
+
+            if [ ! -s "$fw" ]; then
+
+              curl \
+                -L \
+                --fail \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
+                -o "$fw"
+
+            fi
+
+          done
+
+
+      # ============================================================
+      # 5. BUILD ENVIRONMENT
+      # ============================================================
+
+      - name: Show build environment
+        run: |
+
+          echo "===== macOS ====="
+
+          sw_vers
+
+
+          echo "===== Xcode ====="
+
+          xcodebuild \
+            -version
+
+
+          echo "===== clang ====="
+
+          clang \
+            --version
+
+
+          echo "===== Feixiao ====="
+
+          git \
+            -C Feixiao \
+            rev-parse \
+            HEAD
+
+
+          echo "===== rtw88-stable ====="
+
+          git \
+            -C rtw88-stable \
+            rev-parse \
+            HEAD
+
+
+      # ============================================================
+      # 6. BUILD
+      # ============================================================
+
+      - name: Build HP256G8 v8
+        working-directory: Feixiao
+
+        run: |
+
+          make clean \
+            || true
+
+          echo
+          echo "========================================"
+          echo " BUILD HP256G8 RTL8821CE V8 DMA RECOVERY "
+          echo "========================================"
+
+          make all
+
+
+      # ============================================================
+      # 7. VERIFY BINARY
+      # ============================================================
+
+      - name: Verify binary
+        run: |
+
+          test \
+            -d \
+            Feixiao/build/out/rtw88.kext
+
+
+          test \
+            -f \
+            Feixiao/build/out/rtw88ctl
+
+
+          echo "===== KEXT ====="
+
+          file \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88
+
+
+          echo "===== RTW88CTL ====="
+
+          file \
+            Feixiao/build/out/rtw88ctl
+
+
+          echo
+          echo "===== V8 BINARY MARKERS ====="
+
+          strings \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+            | grep -E \
+              "HP256G8 v8|RX tag resync"
+
+
+          echo
+          echo "===== WIFI MARKERS ====="
+
+          strings \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+            | grep -E \
+              "WPA2 connected|ADDBA|A-MPDU|connected chandef" \
+            | head -100 \
+            || true
+
+
+          echo
+          echo "===== INFO.PLIST ====="
+
+          plutil \
+            -p \
+            Feixiao/build/out/rtw88.kext/Contents/Info.plist \
+            | head -80 \
+            || true
+
+
+      # ============================================================
+      # 8. PACKAGE
+      # ============================================================
+
+      - name: Package
+        run: |
+
+          OUT="${{ runner.temp }}/Feixiao-HP256G8-v8-DMA-Recovery"
+
+          mkdir \
+            -p \
+            "$OUT"
+
+
+          cp \
+            -R \
+            Feixiao/build/out/rtw88.kext \
+            "$OUT/"
+
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "$OUT/"
+
+
+          chmod \
+            +x \
+            "$OUT/rtw88ctl"
+
+
+          cat > "$OUT/BUILD-INFO.txt" <<'EOF'
+
+          Feixiao HP 256 G8 / RTL8821CE
+          ===============================================
+
+          BUILD
+          ===============================================
+
+          v8 DMA Recovery + Throughput
+
+
+          FEIXIAO BASE
+          ===============================================
+
+          e963f43188382eced4ef2fa75d19ce4db2315c68
+
+
+          RTW88-STABLE BASE
+          ===============================================
+
+          d029a677c49266fad86750714eb5612becd134d3
+
+
+          HARDWARE
+          ===============================================
+
+          Realtek RTL8821CE
+
+          PCI ID:
+          10EC:C821
+
+
+          RETAINED FROM V7
+          ===============================================
+
+          - WPA2 M4 Key Length = 0
+
+          - WPA2 M4 nonce = zero
+
+          - M4 sent before PTK/GTK hardware install
+
+          - short WPA2 settle before A-MPDU
+
+          - IOGatedOutputQueue TX serialization
+
+          - deferred DMA free handling
+
+          - HT/VHT
+
+          - A-MPDU/A-MSDU
+
+          - automatic firmware rate adaptation
+
+
+          V8 DMA CHANGES
+          ===============================================
+
+          - RX completion-tag wait up to 200 us
+
+          - RX automatic tag sequence resynchronization
+
+          - rate-limited RX mismatch diagnostics
+
+          - avoid permanent one-tag phase offset
+
+          - macOS RX input batching once per interrupt
+
+          - eliminate per-packet flushInputQueue overhead
+
+
+          V8 TX CHANGES
+          ===============================================
+
+          TX stall threshold:
+          96
+
+          TX resume threshold:
+          160
+
+          These restore the native Feixiao thresholds
+          instead of the extra-conservative 128/192
+          values used during v7 testing.
+
+
+          5 GHZ
+          ===============================================
+
+          VHT 80 MHz enabled again.
+
+          HT/VHT rate adaptation retained.
+
+          TX/RX A-MPDU retained.
+
+
+          TARGET SYMPTOMS
+          ===============================================
+
+          - pci bus timeout / RX tag mismatch flood
+
+          - extremely high LAN latency
+
+          - very low upload
+
+          - download below expected 5 GHz throughput
+
+
+          PERFORMANCE GOAL
+          ===============================================
+
+          Stable 5 GHz.
+
+          Target >100 Mbps download.
+
+          Target >100 Mbps upload.
+
+          Actual throughput depends on PHY rate,
+          AP configuration, interference and hardware.
+
+
+          EXPECTED LOGS
+          ===============================================
+
+          rtw88: HP256G8 v8 DMA Recovery active
+
+          rtw88: HP256G8 v8 received M3
+
+          rtw88: HP256G8 v8 M4 key_length=0
+
+          rtw88: HP256G8 v8 M4 nonce zeroed
+
+          rtw88: HP256G8 v8 sending EAPOL M4 before PTK install
+
+          rtw88: HP256G8 v8 PTK/GTK installed after M4
+
+          rtw88: HP256G8 v8 WPA2 settle complete, starting A-MPDU
+
+
+          DMA RECOVERY LOG
+          ===============================================
+
+          If a persistent RX tag offset occurs:
+
+          HP256G8 v8 RX tag resync
+          expected=X
+          observed=Y
+
+          It should NOT produce hundreds of:
+
+          pci bus timeout, check dma status
+
+
+          IMPORTANT
+          ===============================================
+
+          Experimental kernel driver.
+
+          Keep the v7 artifact as backup.
+
+          Do not leave multiple rtw88.kext copies
+          inside EFI/OC/Kexts.
+
+          Always use rtw88.kext and rtw88ctl
+          from this exact artifact together.
+
+          EOF
+
+
+          cd \
+            "${{ runner.temp }}"
+
+
+          zip \
+            -r \
+            Feixiao_HP256G8_v8_DMA_Recovery.zip \
+            Feixiao-HP256G8-v8-DMA-Recovery
+
+
+      # ============================================================
+      # 9. UPLOAD
+      # ============================================================
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+
+        with:
+          name: Feixiao-HP256G8-v8-DMA-Recovery
+
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_DMA_Recovery.zip
+
+          retention-days: 7
