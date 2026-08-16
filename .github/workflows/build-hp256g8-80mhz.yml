@@ -1,4 +1,4 @@
-name: Build HP256G8 80MHz Test v2
+name: Build HP256G8 80MHz Test v3
 
 on:
   workflow_dispatch:
@@ -17,11 +17,12 @@ jobs:
           path: Feixiao
           fetch-depth: 0
 
-      - name: Apply HP256G8 40/80 MHz patch v2
+      - name: Apply HP256G8 40/80 MHz patch v3
         working-directory: Feixiao
         run: |
           python3 <<'PY'
           from pathlib import Path
+          import re
 
           cpp = Path("src/kext/RTW88IEEE80211.cpp")
           hpp = Path("src/kext/RTW88IEEE80211.hpp")
@@ -29,57 +30,65 @@ jobs:
           c = cpp.read_text()
           h = hpp.read_text()
 
-          #
-          # 1. Adiciona declaração do método na classe v1.0.2
-          #
-          decl_marker = "void restoreConnectedChannel();"
+          # --------------------------------------------------
+          # 1. Declare setConnectedChandef()
+          # --------------------------------------------------
 
-          if decl_marker not in h:
-              raise SystemExit(
-                  "ERROR: restoreConnectedChannel declaration not found"
+          if "setConnectedChandef" not in h:
+              pattern = r'(\s*void\s+restoreConnectedChannel\s*\(\s*\)\s*;)'
+
+              if not re.search(pattern, h):
+                  raise SystemExit(
+                      "ERROR: restoreConnectedChannel declaration not found"
+                  )
+
+              h = re.sub(
+                  pattern,
+                  r'\1\n'
+                  r'    void      setConnectedChandef('
+                  r'struct ieee80211_channel *chan);',
+                  h,
+                  count=1
               )
 
-          if "void setConnectedChandef(" not in h:
-              h = h.replace(
-                  decl_marker,
-                  decl_marker +
-                  "\n    void setConnectedChandef(struct ieee80211_channel *chan);"
-              )
-
-          #
-          # 2. Adiciona variável para acompanhar largura do canal.
-          #    Na v1.0.2 usamos _txSeq como marcador confiável.
-          #
-          width_marker = "uint16_t _txSeq = 0;"
-
-          if width_marker not in h:
-              raise SystemExit(
-                  "ERROR: _txSeq marker not found in v1.0.2 header"
-              )
+          # --------------------------------------------------
+          # 2. Add channel-width state next to _txSeq
+          # --------------------------------------------------
 
           if "_connChanWidth" not in h:
-              h = h.replace(
-                  width_marker,
-                  "uint32_t _connChanWidth = 20;\n"
-                  "    " + width_marker
+              pattern = r'(\s*uint16_t\s+_txSeq\s*=\s*0\s*;)'
+
+              if not re.search(pattern, h):
+                  raise SystemExit(
+                      "ERROR: _txSeq declaration not found"
+                  )
+
+              h = re.sub(
+                  pattern,
+                  r'\n    uint32_t _connChanWidth = 20;'
+                  r'\1',
+                  h,
+                  count=1
               )
 
-          #
-          # 3. Função adaptada especificamente para a v1.0.2.
-          #
-          insert_marker = (
-              "void RTW88IEEE80211::restoreConnectedChannel()"
+          # --------------------------------------------------
+          # 3. Insert channel negotiation function
+          # --------------------------------------------------
+
+          insert_pattern = (
+              r'void\s+RTW88IEEE80211::'
+              r'restoreConnectedChannel\s*\(\s*\)'
           )
 
-          if insert_marker not in c:
+          match = re.search(insert_pattern, c)
+
+          if not match:
               raise SystemExit(
                   "ERROR: restoreConnectedChannel implementation not found"
               )
 
-          if (
-              "void RTW88IEEE80211::setConnectedChandef("
-              not in c
-          ):
+          if "RTW88IEEE80211::setConnectedChandef" not in c:
+
               func = r'''
           void RTW88IEEE80211::setConnectedChandef(
               struct ieee80211_channel *chan)
@@ -88,8 +97,7 @@ jobs:
                   return;
 
               /*
-               * Safe fallback:
-               * start at 20 MHz exactly like v1.0.2.
+               * Preserve v1.0.2 behaviour as safe fallback.
                */
               _hw->conf.chandef.chan = chan;
               _hw->conf.chandef.width =
@@ -109,14 +117,11 @@ jobs:
 
               if (!sband) {
                   IOLog(
-                      "rtw88: HP256G8: no supported band, using 20 MHz\n"
+                      "rtw88: HP256G8 no band; using 20 MHz\n"
                   );
                   return;
               }
 
-              /*
-               * Capability of the RTL8821CE/driver.
-               */
               bool can40 =
                   (sband->ht_cap.cap &
                    IEEE80211_HT_CAP_SUP_WIDTH_20_40) != 0;
@@ -136,57 +141,46 @@ jobs:
               uint16_t iesLen = _targetBSS.ies_len;
 
               /*
-               * Read AP HT Operation and VHT Operation IEs.
+               * Parse HT Operation and VHT Operation
+               * from the target AP.
                */
               for (uint16_t i = 0; i + 2 <= iesLen;) {
+
                   uint8_t id = ies[i];
                   uint8_t len = ies[i + 1];
 
                   if (
                       (uint32_t)i + 2U + (uint32_t)len >
                       (uint32_t)iesLen
-                  ) {
+                  )
                       break;
-                  }
 
-                  const uint8_t *data =
-                      ies + i + 2;
+                  const uint8_t *data = ies + i + 2;
 
                   if (
                       id == WLAN_EID_HT_OPERATION &&
                       len >= 2
                   ) {
-                      /*
-                       * HT Operation byte 1:
-                       * bits 0-1 secondary-channel offset.
-                       * bit 2 STA channel width.
-                       */
                       secondaryOffset =
                           data[1] & 0x03;
 
                       apAllows40 =
                           (data[1] & 0x04) != 0;
                   }
+
                   else if (
                       id == WLAN_EID_VHT_OPERATION &&
                       len >= 3
                   ) {
-                      vhtWidth =
-                          data[0];
-
-                      vhtCenterSeg0 =
-                          data[1];
+                      vhtWidth = data[0];
+                      vhtCenterSeg0 = data[1];
                   }
 
                   i += 2 + len;
               }
 
               /*
-               * Try HT40 first.
-               *
-               * secondaryOffset:
-               *   1 = secondary channel above
-               *   3 = secondary channel below
+               * HT40
                */
               if (
                   can40 &&
@@ -201,22 +195,19 @@ jobs:
                   _hw->conf.chandef.width =
                       NL80211_CHAN_WIDTH_40;
 
-                  int center =
-                      (int)chan->center_freq +
-                      (
-                          secondaryOffset == 1
-                              ? 10
-                              : -10
-                      );
-
                   _hw->conf.chandef.center_freq1 =
-                      (uint32_t)center;
+                      (uint32_t)(
+                          (int)chan->center_freq +
+                          (
+                              secondaryOffset == 1
+                                  ? 10
+                                  : -10
+                          )
+                      );
               }
 
               /*
-               * VHT Operation width 1 means an 80 MHz
-               * channel definition for the cases handled
-               * by this driver.
+               * VHT80
                */
               if (
                   can80 &&
@@ -236,9 +227,9 @@ jobs:
               }
 
               IOLog(
-                  "rtw88: HP256G8 chandef: "
+                  "rtw88: HP256G8 chandef "
                   "%u MHz primary=%u center=%u "
-                  "HT40=%d VHT80=%d\n",
+                  "can40=%d can80=%d\n",
                   _connChanWidth,
                   chan->center_freq,
                   _hw->conf.chandef.center_freq1,
@@ -249,79 +240,77 @@ jobs:
 
           '''
 
-              c = c.replace(
-                  insert_marker,
-                  func + insert_marker,
-                  1
+              c = (
+                  c[:match.start()] +
+                  func +
+                  c[match.start():]
               )
 
-          #
-          # 4. Procura os blocos da v1.0.2 que obrigam
-          #    o canal a ficar em 20 MHz.
-          #
-          variants = [
-              """_hw->conf.chandef.chan = chan;
-              _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20_NOHT;
-              _hw->conf.chandef.center_freq1 = chan->center_freq;""",
+          # --------------------------------------------------
+          # 4. Replace v1.0.2 fixed-20MHz configuration
+          # --------------------------------------------------
 
-              """_hw->conf.chandef.chan = chan;
-                  _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20_NOHT;
-                  _hw->conf.chandef.center_freq1 = chan->center_freq;""",
-
-              """_hw->conf.chandef.chan = chan;
-              _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20;
-              _hw->conf.chandef.center_freq1 = chan->center_freq;"""
-          ]
-
-          replacements = 0
-
-          for old in variants:
-              count = c.count(old)
-
-              if count:
-                  c = c.replace(
-                      old,
-                      "setConnectedChandef(chan);"
-                  )
-                  replacements += count
-
-          cpp.write_text(c)
-          hpp.write_text(h)
-
-          print("====================================")
-          print("HP256G8 PATCH V2 APPLIED")
-          print("====================================")
-          print(
-              "Fixed-20MHz blocks replaced:",
-              replacements
+          fixed20 = re.compile(
+              r'_hw->conf\.chandef\.chan\s*=\s*chan\s*;\s*'
+              r'_hw->conf\.chandef\.width\s*=\s*'
+              r'NL80211_CHAN_WIDTH_20_NOHT\s*;\s*'
+              r'_hw->conf\.chandef\.center_freq1\s*=\s*'
+              r'chan->center_freq\s*;'
           )
+
+          # Do not replace the fallback inside our new function.
+          # Split around the function and patch only original code.
+
+          func_start = c.find(
+              "void RTW88IEEE80211::setConnectedChandef"
+          )
+
+          restore_start = c.find(
+              "void RTW88IEEE80211::restoreConnectedChannel"
+          )
+
+          before = c[:func_start]
+          custom = c[func_start:restore_start]
+          after = c[restore_start:]
+
+          after, replacements = fixed20.subn(
+              "setConnectedChandef(chan);",
+              after
+          )
+
+          c = before + custom + after
+
+          hpp.write_text(h)
+          cpp.write_text(c)
+
+          print("====================================")
+          print("HP256G8 40/80 MHz PATCH V3 APPLIED")
+          print("====================================")
+          print("Fixed 20MHz blocks replaced:", replacements)
 
           if replacements == 0:
               print(
-                  "WARNING: no fixed 20MHz block matched."
+                  "WARNING: no original 20 MHz block replaced"
               )
           PY
 
           echo
-          echo "===== HEADER CHECK ====="
-
-          grep -n \
-            "setConnectedChandef" \
+          echo "===== HEADER VERIFY ====="
+          grep -n "restoreConnectedChannel" \
             src/kext/RTW88IEEE80211.hpp
 
-          grep -n \
-            "_connChanWidth" \
+          grep -n "setConnectedChandef" \
+            src/kext/RTW88IEEE80211.hpp
+
+          grep -n "_connChanWidth" \
             src/kext/RTW88IEEE80211.hpp
 
           echo
-          echo "===== CPP CHECK ====="
-
-          grep -n \
-            "HP256G8 chandef" \
+          echo "===== CPP VERIFY ====="
+          grep -n "HP256G8 chandef" \
             src/kext/RTW88IEEE80211.cpp
 
-          grep -n \
-            "setConnectedChandef" \
+          grep -n "setConnectedChandef" \
             src/kext/RTW88IEEE80211.cpp
 
       - name: Clone rtw88-stable
@@ -343,86 +332,39 @@ jobs:
             rtw8814a_fw.bin
           do
             if [ ! -s "$fw" ]; then
-
-              echo "Downloading $fw"
-
               curl \
                 -L \
                 --fail \
                 "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
                 -o "$fw"
-
             fi
           done
 
       - name: Show build environment
         run: |
-          echo "===== macOS ====="
           sw_vers
-
-          echo
-          echo "===== Xcode ====="
           xcodebuild -version
-
-          echo
-          echo "===== Clang ====="
           clang --version
 
       - name: Build custom Feixiao
         working-directory: Feixiao
         run: |
           make clean || true
-
-          echo
-          echo "===================================="
-          echo "BUILDING HP256G8 RTL8821CE DRIVER"
-          echo "===================================="
-
           make all
 
       - name: Verify build output
         run: |
-          echo "===== Build output ====="
+          find Feixiao/build/out -maxdepth 3 -print
 
-          find \
-            Feixiao/build/out \
-            -maxdepth 3 \
-            -print
+          test -d Feixiao/build/out/rtw88.kext
+          test -f Feixiao/build/out/rtw88ctl
 
-          echo
-          echo "===== Checking KEXT ====="
-
-          test \
-            -d \
-            Feixiao/build/out/rtw88.kext
-
-          echo "rtw88.kext: OK"
-
-          echo
-          echo "===== Checking rtw88ctl ====="
-
-          test \
-            -f \
-            Feixiao/build/out/rtw88ctl
-
-          echo "rtw88ctl: OK"
-
-      - name: Show KEXT information
-        run: |
-          echo "===== Info.plist ====="
-
-          /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleIdentifier" \
-            Feixiao/build/out/rtw88.kext/Contents/Info.plist
-
-          /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleVersion" \
-            Feixiao/build/out/rtw88.kext/Contents/Info.plist \
-            || true
+          echo "rtw88.kext OK"
+          echo "rtw88ctl OK"
 
       - name: Package HP256G8 build
         run: |
-          OUT="${{ runner.temp }}/Feixiao-HP256G8-80MHz-v2"
+          OUT="${{ runner.temp }}/Feixiao-HP256G8-80MHz-v3"
 
           mkdir -p "$OUT"
 
@@ -434,37 +376,31 @@ jobs:
             Feixiao/build/out/rtw88ctl \
             "$OUT/"
 
-          chmod +x \
-            "$OUT/rtw88ctl"
+          chmod +x "$OUT/rtw88ctl"
 
           cat > "$OUT/BUILD-INFO.txt" <<'EOF'
-          Feixiao HP 256 G8 RTL8821CE experimental build
+          Feixiao HP 256 G8 / RTL8821CE
 
           Base:
           Feixiao v1.0.2
 
-          Changes:
+          Experimental changes:
           - preserve stable v1.0.2 connection path
-          - negotiate HT 40 MHz
-          - negotiate VHT 80 MHz on 5 GHz
-          - no newer A-MPDU/A-MSDU patches
-          - targeted at RTL8821CE testing
-
-          IMPORTANT:
-          Experimental build. Keep the working v1.0.2
-          backup before installing.
+          - HT 40 MHz negotiation
+          - VHT 80 MHz negotiation on 5 GHz
+          - no newer A-MPDU/A-MSDU changes
           EOF
 
           cd "${{ runner.temp }}"
 
           zip \
             -r \
-            Feixiao_HP256G8_80MHz_v2.zip \
-            Feixiao-HP256G8-80MHz-v2
+            Feixiao_HP256G8_80MHz_v3.zip \
+            Feixiao-HP256G8-80MHz-v3
 
       - name: Upload HP256G8 custom driver
         uses: actions/upload-artifact@v4
         with:
-          name: Feixiao-HP256G8-80MHz-v2
-          path: ${{ runner.temp }}/Feixiao_HP256G8_80MHz_v2.zip
+          name: Feixiao-HP256G8-80MHz-v3
+          path: ${{ runner.temp }}/Feixiao_HP256G8_80MHz_v3.zip
           retention-days: 7
