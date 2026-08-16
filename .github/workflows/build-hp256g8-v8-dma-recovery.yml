@@ -418,9 +418,6 @@ jobs:
 
           # ============================================================
           # 8. ENABLE 80 MHz AGAIN
-          #
-          # v7 deliberately capped to 40 MHz.
-          # v8 re-enables the original VHT80 path.
           # ============================================================
 
           disabled80 = (
@@ -485,17 +482,6 @@ jobs:
 
           # ============================================================
           # 10. TX FLOW CONTROL
-          #
-          # v7:
-          #     stall  = 128
-          #     resume = 192
-          #
-          # That is intentionally very conservative but
-          # can keep the macOS output queue stalled too long.
-          #
-          # Restore Feixiao's native values:
-          #
-          #     96 / 160
           # ============================================================
 
           p = p.replace(
@@ -555,12 +541,10 @@ jobs:
 
               h = h.replace(
                   anchor,
-
                   anchor
                   +
                   "\n"
                   "    void flushRxQueue();",
-
                   1
               )
 
@@ -582,13 +566,11 @@ jobs:
 
               h = h.replace(
                   anchor,
-
                   anchor
                   +
                   "\n"
                   "    bool                    "
                   "_rxQueued     = false;",
-
                   1
               )
 
@@ -710,413 +692,284 @@ jobs:
 
               p = p.replace(
                   insert_before,
-
                   flush_impl
                   +
                   insert_before,
-
                   1
               )
 
-          print("macOS RX batching: OK")# ============================================================
-# 15. RTW88 RX DMA COMPLETION-TAG RECOVERY
-#
-# IMPORTANT:
-#
-# Do NOT match the entire function using whitespace.
-#
-# Locate:
-#
-# START:
-# static void rtw_pci_dma_check(
-#
-# END:
-# static u32 __pci_get_hw_tx_ring_rp(
-#
-# This makes the patch independent of tabs,
-# spaces and source formatting.
-# ============================================================
+          print("macOS RX batching: OK")
+
+          # ============================================================
+          # 15. RTW88 RX DMA COMPLETION-TAG RECOVERY
+          # ============================================================
+
+          if (
+              "HP256G8 v8 RX tag resync"
+              not in lp
+          ):
+
+              dma_start_anchor = (
+                  "static void rtw_pci_dma_check("
+              )
+
+              dma_end_anchor = (
+                  "static u32 __pci_get_hw_tx_ring_rp("
+              )
+
+              dma_start = lp.find(
+                  dma_start_anchor
+              )
+
+              if (
+                  dma_start < 0
+              ):
+                  raise SystemExit(
+                      "ERROR: rtw_pci_dma_check "
+                      "function start not found"
+                  )
+
+              dma_end = lp.find(
+                  dma_end_anchor,
+                  dma_start
+              )
+
+              if (
+                  dma_end < 0
+              ):
+                  raise SystemExit(
+                      "ERROR: function after "
+                      "rtw_pci_dma_check not found"
+                  )
+
+              old_dma_function = lp[
+                  dma_start:dma_end
+              ]
+
+              if (
+                  "pci bus timeout, check dma status"
+                  not in old_dma_function
+              ):
+                  raise SystemExit(
+                      "ERROR: selected DMA function "
+                      "does not contain timeout check"
+                  )
+
+              if (
+                  "rtwpci->rx_tag"
+                  not in old_dma_function
+              ):
+                  raise SystemExit(
+                      "ERROR: selected DMA function "
+                      "does not contain rx_tag"
+                  )
+
+              print(
+                  "Original rtw_pci_dma_check located: OK"
+              )
+
+              new_dma_function = r'''static void rtw_pci_dma_check(
+                  struct rtw_dev *rtwdev,
+                  struct rtw_pci_rx_ring *rx_ring,
+                  u32 idx)
+          {
+              struct rtw_pci *rtwpci =
+                  (struct rtw_pci *)rtwdev->priv;
+
+              const struct rtw_chip_info *chip =
+                  rtwdev->chip;
+
+              struct rtw_pci_rx_buffer_desc *buf_desc;
+
+              u32 desc_sz =
+                  chip->rx_buf_desc_sz;
+
+              u16 total_pkt_size = 0;
+
+              u16 expected =
+                  rtwpci->rx_tag;
+
+              int i;
+
+              static u32 mismatch_count = 0;
+
+              buf_desc =
+                  (struct rtw_pci_rx_buffer_desc *)
+                  (
+                      rx_ring->r.head
+                      +
+                      idx * desc_sz
+                  );
+
+              /*
+               * HP256G8 v8 DMA RECOVERY
+               *
+               * Wait up to 200 us for the RX completion
+               * tag to become visible to the CPU.
+               */
+
+              for (
+                  i = 0;
+                  i < 100;
+                  i++
+              ) {
+
+                  total_pkt_size =
+                      le16_to_cpu(
+                          READ_ONCE(
+                              buf_desc->total_pkt_size
+                          )
+                      );
+
+                  if (
+                      total_pkt_size ==
+                      expected
+                  ) {
+                      break;
+                  }
+
+                  udelay(
+                      2
+                  );
+              }
+
+              if (
+                  total_pkt_size !=
+                  expected
+              ) {
+
+                  mismatch_count++;
+
+                  if (
+                      mismatch_count == 1
+                      ||
+                      (
+                          mismatch_count
+                          &
+                          0xff
+                      )
+                      ==
+                      0
+                  ) {
+
+                      rtw_warn(
+                          rtwdev,
+                          "HP256G8 v8 RX tag resync "
+                          "expected=%u observed=%u "
+                          "count=%u\n",
+                          expected,
+                          total_pkt_size,
+                          mismatch_count
+                      );
+                  }
+
+                  rtwpci->rx_tag =
+                      total_pkt_size;
+              }
+
+              rtwpci->rx_tag =
+                  (
+                      rtwpci->rx_tag
+                      +
+                      1
+                  )
+                  %
+                  RX_TAG_MAX;
+          }
+
+
+          '''
+
+              lp = (
+                  lp[:dma_start]
+                  +
+                  new_dma_function
+                  +
+                  lp[dma_end:]
+              )
+
+              print(
+                  "RX DMA tag recovery patch: OK"
+              )
+
+          # ============================================================
+          # VERIFY DMA FUNCTION
+          # ============================================================
+
+          dma_verify_start = lp.find(
+              "static void rtw_pci_dma_check("
+          )
+
+          dma_verify_end = lp.find(
+              "static u32 __pci_get_hw_tx_ring_rp(",
+              dma_verify_start
+          )
+
+          if (
+              dma_verify_start < 0
+              or
+              dma_verify_end < 0
+          ):
+              raise SystemExit(
+                  "ERROR: patched DMA function "
+                  "boundaries are invalid"
+              )
+
+          dma_verify = lp[
+              dma_verify_start:
+              dma_verify_end
+          ]
+
+          required_dma = [
+              "HP256G8 v8 DMA RECOVERY",
+              "HP256G8 v8 RX tag resync",
+              "READ_ONCE",
+              "i < 100",
+              "udelay(",
+              "total_pkt_size",
+              "rtwpci->rx_tag",
+              "RX_TAG_MAX",
+          ]
+
+          for marker in required_dma:
+
+              if (
+                  marker not in dma_verify
+              ):
+                  raise SystemExit(
+                      "ERROR: DMA recovery marker "
+                      f"missing: {marker}"
+                  )
+
+          if (
+              "pci bus timeout, check dma status"
+              in dma_verify
+          ):
+              raise SystemExit(
+                  "ERROR: old PCI DMA timeout "
+                  "warning still present"
+              )
+
+          print(
+              "Final RX DMA recovery validation: OK"
+          )
 
-if (
-    "HP256G8 v8 RX tag resync"
-    not in lp
-):
-
-    dma_start_anchor = (
-        "static void rtw_pci_dma_check("
-    )
-
-    dma_end_anchor = (
-        "static u32 __pci_get_hw_tx_ring_rp("
-    )
-
-
-    dma_start = lp.find(
-        dma_start_anchor
-    )
-
-
-    if (
-        dma_start < 0
-    ):
-
-        raise SystemExit(
-            "ERROR: rtw_pci_dma_check "
-            "function start not found"
-        )
-
-
-    dma_end = lp.find(
-        dma_end_anchor,
-        dma_start
-    )
-
-
-    if (
-        dma_end < 0
-    ):
-
-        raise SystemExit(
-            "ERROR: function after "
-            "rtw_pci_dma_check not found"
-        )
-
-
-    old_dma_function = lp[
-        dma_start:dma_end
-    ]
-
-
-    # Make sure we selected the correct function.
-
-    if (
-        "pci bus timeout, check dma status"
-        not in old_dma_function
-    ):
-
-        raise SystemExit(
-            "ERROR: selected DMA function "
-            "does not contain timeout check"
-        )
-
-
-    if (
-        "rtwpci->rx_tag"
-        not in old_dma_function
-    ):
-
-        raise SystemExit(
-            "ERROR: selected DMA function "
-            "does not contain rx_tag"
-        )
-
-
-    print(
-        "Original rtw_pci_dma_check located: OK"
-    )
-
-
-    new_dma_function = r'''static void rtw_pci_dma_check(
-        struct rtw_dev *rtwdev,
-        struct rtw_pci_rx_ring *rx_ring,
-        u32 idx)
-{
-    struct rtw_pci *rtwpci =
-        (struct rtw_pci *)rtwdev->priv;
-
-    const struct rtw_chip_info *chip =
-        rtwdev->chip;
-
-    struct rtw_pci_rx_buffer_desc *buf_desc;
-
-    u32 desc_sz =
-        chip->rx_buf_desc_sz;
-
-    u16 total_pkt_size = 0;
-
-    u16 expected =
-        rtwpci->rx_tag;
-
-    int i;
-
-    /*
-     * HP256G8 v8
-     *
-     * Count persistent RX DMA tag mismatches.
-     *
-     * Do not flood the macOS kernel log for
-     * every received frame.
-     */
-    static u32 mismatch_count = 0;
-
-
-    buf_desc =
-        (struct rtw_pci_rx_buffer_desc *)
-        (
-            rx_ring->r.head
-            +
-            idx * desc_sz
-        );
-
-
-    /*
-     * HP256G8 v8 DMA RECOVERY
-     * ========================================
-     *
-     * RTL8821CE may expose the updated RX
-     * write pointer before the descriptor's
-     * DMA completion tag is fully visible
-     * to the CPU.
-     *
-     * Reading it immediately can therefore
-     * see the previous RX tag.
-     *
-     * Original code interprets that as:
-     *
-     * pci bus timeout, check dma status
-     *
-     * Wait briefly for the coherent
-     * descriptor write to become visible.
-     *
-     * Maximum:
-     *
-     * 100 iterations x 2 us = 200 us.
-     *
-     * Normal case exits on first read.
-     */
-
-    for (
-        i = 0;
-        i < 100;
-        i++
-    ) {
-
-        total_pkt_size =
-            le16_to_cpu(
-                READ_ONCE(
-                    buf_desc->total_pkt_size
-                )
-            );
-
-
-        if (
-            total_pkt_size ==
-            expected
-        ) {
-
-            break;
-        }
-
-
-        udelay(
-            2
-        );
-    }
-
-
-    /*
-     * If the descriptor still has a
-     * different completion sequence after
-     * the bounded wait, synchronize the
-     * software tag with what hardware
-     * actually completed.
-     *
-     * Without this correction, missing a
-     * single tag can leave host and device
-     * permanently one tag apart and produce
-     * a warning for practically every RX
-     * packet.
-     */
-
-    if (
-        total_pkt_size !=
-        expected
-    ) {
-
-        mismatch_count++;
-
-
-        /*
-         * Log first occurrence and then only
-         * once every 256 mismatches.
-         */
-
-        if (
-            mismatch_count == 1
-            ||
-            (
-                mismatch_count
-                &
-                0xff
-            )
-            ==
-            0
-        ) {
-
-            rtw_warn(
-                rtwdev,
-
-                "HP256G8 v8 RX tag resync "
-                "expected=%u observed=%u "
-                "count=%u\n",
-
-                expected,
-                total_pkt_size,
-                mismatch_count
-            );
-        }
-
-
-        /*
-         * Rebase software sequence to the
-         * completion tag actually observed.
-         */
-
-        rtwpci->rx_tag =
-            total_pkt_size;
-    }
-
-
-    /*
-     * Advance to the descriptor sequence
-     * expected for the next RX frame.
-     */
-
-    rtwpci->rx_tag =
-        (
-            rtwpci->rx_tag
-            +
-            1
-        )
-        %
-        RX_TAG_MAX;
-}
-
-
-'''
-
-
-    lp = (
-        lp[:dma_start]
-        +
-        new_dma_function
-        +
-        lp[dma_end:]
-    )
-
-
-    print(
-        "RX DMA tag recovery patch: OK"
-    )
-
-
-# ============================================================
-# VERIFY THE FUNCTION AFTER REPLACEMENT
-# ============================================================
-
-dma_verify_start = lp.find(
-    "static void rtw_pci_dma_check("
-)
-
-
-dma_verify_end = lp.find(
-    "static u32 __pci_get_hw_tx_ring_rp(",
-    dma_verify_start
-)
-
-
-if (
-    dma_verify_start < 0
-    or
-    dma_verify_end < 0
-):
-
-    raise SystemExit(
-        "ERROR: patched DMA function "
-        "boundaries are invalid"
-    )
-
-
-dma_verify = lp[
-    dma_verify_start:
-    dma_verify_end
-]
-
-
-required_dma = [
-
-    "HP256G8 v8 DMA RECOVERY",
-
-    "HP256G8 v8 RX tag resync",
-
-    "READ_ONCE",
-
-    "i < 100",
-
-    "udelay(",
-
-    "total_pkt_size",
-
-    "rtwpci->rx_tag",
-
-    "RX_TAG_MAX",
-]
-
-
-for marker in required_dma:
-
-    if (
-        marker not in dma_verify
-    ):
-
-        raise SystemExit(
-            "ERROR: DMA recovery marker "
-            f"missing: {marker}"
-        )
-
-
-# Original log spam must NOT remain
-# inside rtw_pci_dma_check().
-
-if (
-    "pci bus timeout, check dma status"
-    in dma_verify
-):
-
-    raise SystemExit(
-        "ERROR: old PCI DMA timeout "
-        "warning still present"
-    )
-
-
-print(
-    "Final RX DMA recovery validation: OK"
-)
           # ============================================================
           # 16. FINAL IEEE/WPA2 VALIDATION
           # ============================================================
 
           required_c = [
-
               "HP256G8 v8 DMA Recovery active",
-
               "HP256G8 v8 received M3",
-
               "HP256G8 v8 M4 key_length=0",
-
               "HP256G8 v8 M4 nonce zeroed",
-
               "HP256G8 v8 sending EAPOL M4 "
               "before PTK install",
-
               "HP256G8 v8 M4 submitted, "
               "installing PTK",
-
               "HP256G8 v8 PTK/GTK installed "
               "after M4",
-
               "HP256G8 v8 WPA2 settle complete",
-
           ]
 
           for marker in required_c:
@@ -1322,14 +1175,12 @@ print(
             "HP256G8 v8 RX tag resync" \
             rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
 
-
       # ============================================================
       # 4. DOWNLOAD FIRMWARE
       # ============================================================
 
       - name: Download firmware
         run: |
-
           cd Feixiao/firmware
 
           for fw in \
@@ -1339,21 +1190,15 @@ print(
             rtw8821a_fw.bin \
             rtw8812a_fw.bin \
             rtw8814a_fw.bin
-
           do
-
             if [ ! -s "$fw" ]; then
-
               curl \
                 -L \
                 --fail \
                 "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
                 -o "$fw"
-
             fi
-
           done
-
 
       # ============================================================
       # 5. BUILD ENVIRONMENT
@@ -1361,39 +1206,20 @@ print(
 
       - name: Show build environment
         run: |
-
           echo "===== macOS ====="
-
           sw_vers
 
-
           echo "===== Xcode ====="
-
-          xcodebuild \
-            -version
-
+          xcodebuild -version
 
           echo "===== clang ====="
-
-          clang \
-            --version
-
+          clang --version
 
           echo "===== Feixiao ====="
-
-          git \
-            -C Feixiao \
-            rev-parse \
-            HEAD
-
+          git -C Feixiao rev-parse HEAD
 
           echo "===== rtw88-stable ====="
-
-          git \
-            -C rtw88-stable \
-            rev-parse \
-            HEAD
-
+          git -C rtw88-stable rev-parse HEAD
 
       # ============================================================
       # 6. BUILD
@@ -1401,11 +1227,8 @@ print(
 
       - name: Build HP256G8 v8
         working-directory: Feixiao
-
         run: |
-
-          make clean \
-            || true
+          make clean || true
 
           echo
           echo "========================================"
@@ -1414,35 +1237,24 @@ print(
 
           make all
 
-
       # ============================================================
       # 7. VERIFY BINARY
       # ============================================================
 
       - name: Verify binary
         run: |
-
-          test \
-            -d \
-            Feixiao/build/out/rtw88.kext
-
-
-          test \
-            -f \
-            Feixiao/build/out/rtw88ctl
-
+          test -d Feixiao/build/out/rtw88.kext
+          test -f Feixiao/build/out/rtw88ctl
 
           echo "===== KEXT ====="
 
           file \
             Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88
 
-
           echo "===== RTW88CTL ====="
 
           file \
             Feixiao/build/out/rtw88ctl
-
 
           echo
           echo "===== V8 BINARY MARKERS ====="
@@ -1451,7 +1263,6 @@ print(
             Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
             | grep -E \
               "HP256G8 v8|RX tag resync"
-
 
           echo
           echo "===== WIFI MARKERS ====="
@@ -1463,7 +1274,6 @@ print(
             | head -100 \
             || true
 
-
           echo
           echo "===== INFO.PLIST ====="
 
@@ -1473,39 +1283,28 @@ print(
             | head -80 \
             || true
 
-
       # ============================================================
       # 8. PACKAGE
       # ============================================================
 
       - name: Package
         run: |
-
           OUT="${{ runner.temp }}/Feixiao-HP256G8-v8-DMA-Recovery"
 
-          mkdir \
-            -p \
-            "$OUT"
+          mkdir -p "$OUT"
 
-
-          cp \
-            -R \
+          cp -R \
             Feixiao/build/out/rtw88.kext \
             "$OUT/"
-
 
           cp \
             Feixiao/build/out/rtw88ctl \
             "$OUT/"
 
-
-          chmod \
-            +x \
+          chmod +x \
             "$OUT/rtw88ctl"
 
-
           cat > "$OUT/BUILD-INFO.txt" <<'EOF'
-
           Feixiao HP 256 G8 / RTL8821CE
           ===============================================
 
@@ -1514,18 +1313,15 @@ print(
 
           v8 DMA Recovery + Throughput
 
-
           FEIXIAO BASE
           ===============================================
 
           e963f43188382eced4ef2fa75d19ce4db2315c68
 
-
           RTW88-STABLE BASE
           ===============================================
 
           d029a677c49266fad86750714eb5612becd134d3
-
 
           HARDWARE
           ===============================================
@@ -1535,44 +1331,28 @@ print(
           PCI ID:
           10EC:C821
 
-
           RETAINED FROM V7
           ===============================================
 
           - WPA2 M4 Key Length = 0
-
           - WPA2 M4 nonce = zero
-
           - M4 sent before PTK/GTK hardware install
-
           - short WPA2 settle before A-MPDU
-
           - IOGatedOutputQueue TX serialization
-
           - deferred DMA free handling
-
           - HT/VHT
-
           - A-MPDU/A-MSDU
-
           - automatic firmware rate adaptation
-
 
           V8 DMA CHANGES
           ===============================================
 
           - RX completion-tag wait up to 200 us
-
           - RX automatic tag sequence resynchronization
-
           - rate-limited RX mismatch diagnostics
-
           - avoid permanent one-tag phase offset
-
           - macOS RX input batching once per interrupt
-
           - eliminate per-packet flushInputQueue overhead
-
 
           V8 TX CHANGES
           ===============================================
@@ -1583,11 +1363,6 @@ print(
           TX resume threshold:
           160
 
-          These restore the native Feixiao thresholds
-          instead of the extra-conservative 128/192
-          values used during v7 testing.
-
-
           5 GHZ
           ===============================================
 
@@ -1597,18 +1372,13 @@ print(
 
           TX/RX A-MPDU retained.
 
-
           TARGET SYMPTOMS
           ===============================================
 
           - pci bus timeout / RX tag mismatch flood
-
           - extremely high LAN latency
-
           - very low upload
-
           - download below expected 5 GHz throughput
-
 
           PERFORMANCE GOAL
           ===============================================
@@ -1622,24 +1392,16 @@ print(
           Actual throughput depends on PHY rate,
           AP configuration, interference and hardware.
 
-
           EXPECTED LOGS
           ===============================================
 
           rtw88: HP256G8 v8 DMA Recovery active
-
           rtw88: HP256G8 v8 received M3
-
           rtw88: HP256G8 v8 M4 key_length=0
-
           rtw88: HP256G8 v8 M4 nonce zeroed
-
           rtw88: HP256G8 v8 sending EAPOL M4 before PTK install
-
           rtw88: HP256G8 v8 PTK/GTK installed after M4
-
           rtw88: HP256G8 v8 WPA2 settle complete, starting A-MPDU
-
 
           DMA RECOVERY LOG
           ===============================================
@@ -1654,7 +1416,6 @@ print(
 
           pci bus timeout, check dma status
 
-
           IMPORTANT
           ===============================================
 
@@ -1667,19 +1428,13 @@ print(
 
           Always use rtw88.kext and rtw88ctl
           from this exact artifact together.
-
           EOF
 
+          cd "${{ runner.temp }}"
 
-          cd \
-            "${{ runner.temp }}"
-
-
-          zip \
-            -r \
+          zip -r \
             Feixiao_HP256G8_v8_DMA_Recovery.zip \
             Feixiao-HP256G8-v8-DMA-Recovery
-
 
       # ============================================================
       # 9. UPLOAD
@@ -1687,10 +1442,7 @@ print(
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-
         with:
           name: Feixiao-HP256G8-v8-DMA-Recovery
-
           path: ${{ runner.temp }}/Feixiao_HP256G8_v8_DMA_Recovery.zip
-
           retention-days: 7
