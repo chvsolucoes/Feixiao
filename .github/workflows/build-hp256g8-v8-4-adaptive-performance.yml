@@ -1,0 +1,3202 @@
+#!/usr/bin/env python3
+
+# ======================================================================
+#
+# HP 256 G8
+# REALTEK RTL8821CE
+#
+# FEIXIAO V8.4
+# ADAPTIVE PERFORMANCE + SAFE RX
+#
+# ======================================================================
+
+from pathlib import Path
+import sys
+
+
+# ======================================================================
+# ARGUMENTOS
+# ======================================================================
+
+if len(sys.argv) != 3:
+
+    raise SystemExit(
+        "usage: "
+        "patch_hp256g8_v84.py "
+        "<Feixiao-directory> "
+        "<rtw88-stable-directory>"
+    )
+
+
+FEIXIAO_ROOT = Path(
+    sys.argv[1]
+).resolve()
+
+
+RTW88_ROOT = Path(
+    sys.argv[2]
+).resolve()
+
+
+# ======================================================================
+# ARQUIVOS
+# ======================================================================
+
+IEEE_CPP = (
+    FEIXIAO_ROOT
+    /
+    "src/kext/RTW88IEEE80211.cpp"
+)
+
+
+IEEE_HPP = (
+    FEIXIAO_ROOT
+    /
+    "src/kext/RTW88IEEE80211.hpp"
+)
+
+
+PCI_CPP = (
+    FEIXIAO_ROOT
+    /
+    "src/kext/RTW88PCIDevice.cpp"
+)
+
+
+COMPAT_C = (
+    FEIXIAO_ROOT
+    /
+    "src/compat/rtw88_compat.c"
+)
+
+
+LINUX_PCI = (
+    RTW88_ROOT
+    /
+    "drivers/net/wireless/realtek/rtw88/pci.c"
+)
+
+
+# ======================================================================
+# VALIDAR ARQUIVOS
+# ======================================================================
+
+SOURCES = (
+
+    IEEE_CPP,
+
+    IEEE_HPP,
+
+    PCI_CPP,
+
+    COMPAT_C,
+
+    LINUX_PCI,
+
+)
+
+
+for source in SOURCES:
+
+    if not source.exists():
+
+        raise SystemExit(
+            f"ERROR: source not found: {source}"
+        )
+
+
+# ======================================================================
+# CARREGAR
+# ======================================================================
+
+c = IEEE_CPP.read_text()
+
+h = IEEE_HPP.read_text()
+
+p = PCI_CPP.read_text()
+
+r = COMPAT_C.read_text()
+
+lp = LINUX_PCI.read_text()
+
+
+# ======================================================================
+# CABEÇALHO
+# ======================================================================
+
+print()
+
+print(
+    "=" * 78
+)
+
+print(
+    "HP256G8 RTL8821CE V8.4 ADAPTIVE PERFORMANCE"
+)
+
+print(
+    "=" * 78
+)
+
+print()
+
+
+# ======================================================================
+# FUNÇÕES AUXILIARES
+# ======================================================================
+
+def require(
+    text,
+    marker,
+    description,
+):
+
+    if marker not in text:
+
+        raise SystemExit(
+            "ERROR: "
+            +
+            description
+            +
+            " missing: "
+            +
+            repr(marker)
+        )
+
+
+def replace_once(
+    text,
+    old,
+    new,
+    description,
+):
+
+    if old not in text:
+
+        raise SystemExit(
+            "ERROR: "
+            +
+            description
+            +
+            " anchor missing"
+        )
+
+    return text.replace(
+        old,
+        new,
+        1
+    )
+
+
+def print_ok(
+    message
+):
+
+    print(
+        f"[OK] {message}"
+    )
+
+
+# ======================================================================
+#
+# 1.
+# BASE TX SERIALIZATION
+#
+# ======================================================================
+
+require(
+    p,
+
+    "IOGatedOutputQueue::withTarget",
+
+    "IOGatedOutputQueue"
+)
+
+
+print_ok(
+    "Native TX serialization present"
+)
+
+
+# ======================================================================
+#
+# 2.
+# DEFERRED DMA FREE
+#
+# ======================================================================
+
+require(
+    p,
+
+    "drainPendingFree()",
+
+    "deferred DMA free"
+)
+
+
+print_ok(
+    "Deferred DMA free present"
+)
+
+
+# ======================================================================
+#
+# 3.
+# AUTOMATIC RATE CONTROL
+#
+# ======================================================================
+
+legacy_rate = (
+    "rtwdev->dm_info.fix_rate = DESC_RATE6M;"
+)
+
+
+automatic_rate = (
+    "rtwdev->dm_info.fix_rate = 0xFF;"
+)
+
+
+if legacy_rate in r:
+
+    r = r.replace(
+
+        legacy_rate,
+
+        automatic_rate,
+
+        1
+    )
+
+
+require(
+    r,
+
+    automatic_rate,
+
+    "automatic rate setting"
+)
+
+
+print_ok(
+    "Firmware automatic rate selection enabled"
+)
+
+
+# ======================================================================
+#
+# 4.
+# WPA2 M4 KEY LENGTH = ZERO
+#
+# ======================================================================
+
+old_key_length = (
+    "    key[3] = 0; key[4] = 16; "
+    "/* key length = 16 (AES-128) */"
+)
+
+
+new_key_length = """    if (step == 4) {
+
+        /*
+         * WPA2 Message 4:
+         *
+         * IEEE 802.11i / WPA2 expects
+         * Key Length = 0 in M4.
+         */
+
+        key[3] = 0;
+
+        key[4] = 0;
+
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 M4 key_length=0\\n"
+        );
+
+    } else {
+
+        key[3] = 0;
+
+        key[4] = 16;
+    }"""
+
+
+if (
+    "HP256G8 v8.4 M4 key_length=0"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        old_key_length,
+
+        new_key_length,
+
+        "WPA2 M4 Key Length"
+    )
+
+
+print_ok(
+    "WPA2 M4 Key Length = 0"
+)
+
+
+# ======================================================================
+#
+# 5.
+# WPA2 M4 NONCE
+#
+# ======================================================================
+
+old_nonce = (
+    "    memcpy(key + 13, _snonce, 32);       "
+    "/* key[13..44] = SNonce */"
+)
+
+
+new_nonce = """    if (step == 4) {
+
+        /*
+         * WPA2 M4 Key Nonce must be zero.
+         */
+
+        memset(
+            key + 13,
+            0,
+            32
+        );
+
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 M4 nonce zeroed\\n"
+        );
+
+    } else {
+
+        memcpy(
+            key + 13,
+            _snonce,
+            32
+        );
+    }"""
+
+
+if (
+    "HP256G8 v8.4 M4 nonce zeroed"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        old_nonce,
+
+        new_nonce,
+
+        "WPA2 M4 nonce"
+    )
+
+
+print_ok(
+    "WPA2 M4 nonce zero"
+)
+
+
+# ======================================================================
+#
+# 6.
+# WPA2 M3 DIAGNOSTIC
+#
+# ======================================================================
+
+m3_anchor = (
+    "    } else if (is_m3) {"
+)
+
+
+m3_replacement = """    } else if (is_m3) {
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 received M3 "
+            "replay=%02x%02x%02x%02x"
+            "%02x%02x%02x%02x\\n",
+            data[9],
+            data[10],
+            data[11],
+            data[12],
+            data[13],
+            data[14],
+            data[15],
+            data[16]
+        );"""
+
+
+if (
+    "HP256G8 v8.4 received M3"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        m3_anchor,
+
+        m3_replacement,
+
+        "WPA2 M3 handler"
+    )
+
+
+print_ok(
+    "WPA2 M3 diagnostics"
+)
+
+
+# ======================================================================
+#
+# 7.
+# SEND M4 BEFORE PTK / GTK
+#
+# ======================================================================
+
+if (
+    "HP256G8 v8.4 sending EAPOL M4"
+    not in c
+):
+
+    m3_position = c.find(
+        "HP256G8 v8.4 received M3"
+    )
+
+
+    if m3_position < 0:
+
+        raise SystemExit(
+            "ERROR: patched M3 not found"
+        )
+
+
+    ptk_anchor = (
+        "if (!installKey("
+        "&_ptkConf, "
+        "true, "
+        "0, "
+        "WLAN_CIPHER_SUITE_CCMP,"
+    )
+
+
+    m4_anchor = (
+        "sendEAPOLKey("
+        "4, "
+        "_replayCtr, "
+        "false, "
+        "false, "
+        "true);"
+    )
+
+
+    state_anchor = (
+        "_state = "
+        "RTW88_STATE_CONNECTED;"
+    )
+
+
+    start = c.find(
+
+        ptk_anchor,
+
+        m3_position
+    )
+
+
+    if start < 0:
+
+        raise SystemExit(
+            "ERROR: PTK install anchor missing"
+        )
+
+
+    old_m4_position = c.find(
+
+        m4_anchor,
+
+        start
+    )
+
+
+    if old_m4_position < 0:
+
+        raise SystemExit(
+            "ERROR: original M4 send missing"
+        )
+
+
+    end = c.find(
+
+        state_anchor,
+
+        old_m4_position
+    )
+
+
+    if end < 0:
+
+        raise SystemExit(
+            "ERROR: CONNECTED state missing"
+        )
+
+
+    end += len(
+        state_anchor
+    )
+
+
+    old_wpa_block = c[
+        start:end
+    ]
+
+
+    if (
+        "installKey(&_gtkConf"
+        not in old_wpa_block
+    ):
+
+        raise SystemExit(
+            "ERROR: selected WPA block does not contain GTK"
+        )
+
+
+    new_wpa_block = """IOLog(
+            "rtw88: HP256G8 v8.4 "
+            "sending EAPOL M4 before PTK install\\n"
+        );
+
+
+        sendEAPOLKey(
+            4,
+            _replayCtr,
+            false,
+            false,
+            true
+        );
+
+
+        /*
+         * Give M4 a small chance to leave
+         * the software TX path before
+         * enabling pairwise hardware CCMP.
+         */
+
+        IOSleep(
+            40
+        );
+
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 "
+            "M4 submitted, installing PTK\\n"
+        );
+
+
+        if (!installKey(
+                &_ptkConf,
+                true,
+                0,
+                WLAN_CIPHER_SUITE_CCMP,
+                _ptk + 32,
+                16))
+            return;
+
+
+        uint32_t groupCipher =
+            (
+                _targetBSS.group_cipher ==
+                WLAN_CIPHER_SUITE_TKIP
+            )
+            ?
+            WLAN_CIPHER_SUITE_TKIP
+            :
+            WLAN_CIPHER_SUITE_CCMP;
+
+
+        if (
+            gtk_len
+            &&
+            !installKey(
+                &_gtkConf,
+                false,
+                gtk_idx,
+                groupCipher,
+                gtk,
+                gtk_len
+            )
+        )
+            return;
+
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 "
+            "PTK/GTK installed after M4\\n"
+        );
+
+
+        _perfLastRxFrameCount =
+            _rxFrameCount;
+
+
+        _perfTxWithoutRx =
+            0;
+
+
+        _fallbackPending =
+            false;
+
+
+        _state =
+            RTW88_STATE_CONNECTED;"""
+
+
+    c = (
+
+        c[:start]
+
+        +
+
+        new_wpa_block
+
+        +
+
+        c[end:]
+    )
+
+
+print_ok(
+    "M4 is sent before PTK/GTK installation"
+)
+
+
+# ======================================================================
+#
+# 8.
+# A-MPDU SETTLE
+#
+# ======================================================================
+
+old_ampdu = (
+    "        startTxAggregation();   "
+    "/* keys are installed — "
+    "negotiate uplink A-MPDU */"
+)
+
+
+new_ampdu = """        /*
+         * WPA2 hardware-key settle period.
+         */
+
+        IOSleep(
+            100
+        );
+
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 "
+            "WPA2 settle complete, starting A-MPDU\\n"
+        );
+
+
+        startTxAggregation();"""
+
+
+if (
+    "HP256G8 v8.4 WPA2 settle complete"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        old_ampdu,
+
+        new_ampdu,
+
+        "A-MPDU start"
+    )
+
+
+print_ok(
+    "A-MPDU starts after WPA2 settle"
+)
+
+
+# ======================================================================
+#
+# 9.
+# HEADER:
+# ADAPTIVE METHODS
+#
+# ======================================================================
+
+method_anchor = (
+    "    void      setConnectedChandef("
+    "struct ieee80211_channel *chan);"
+)
+
+
+method_patch = (
+    method_anchor
+    +
+    "\n"
+    "    void      scheduleFallback40MHz();"
+    +
+    "\n"
+    "    void      runFallback40MHz();"
+    +
+    "\n"
+    "    static void fallbackTCFn("
+    "thread_call_param_t self, "
+    "thread_call_param_t);"
+)
+
+
+if (
+    "scheduleFallback40MHz"
+    not in h
+):
+
+    h = replace_once(
+
+        h,
+
+        method_anchor,
+
+        method_patch,
+
+        "setConnectedChandef declaration"
+    )
+
+
+print_ok(
+    "Adaptive fallback method declarations"
+)
+
+
+# ======================================================================
+#
+# 10.
+# HEADER:
+# FALLBACK THREAD CALL
+#
+# ======================================================================
+
+thread_anchor = (
+    "    thread_call_t _connectTC = nullptr;"
+)
+
+
+thread_patch = (
+    thread_anchor
+    +
+    "\n"
+    "    thread_call_t _fallbackTC = nullptr;"
+)
+
+
+if (
+    "_fallbackTC"
+    not in h
+):
+
+    h = replace_once(
+
+        h,
+
+        thread_anchor,
+
+        thread_patch,
+
+        "_connectTC member"
+    )
+
+
+print_ok(
+    "Fallback thread-call state"
+)
+
+
+# ======================================================================
+#
+# 11.
+# HEADER:
+# ADAPTIVE PERFORMANCE STATE
+#
+# ======================================================================
+
+width_anchor = (
+    "    uint8_t  _connChanWidth = 20;  "
+    "/* negotiated operating width: "
+    "20/40/80 MHz */"
+)
+
+
+width_patch = (
+    width_anchor
+    +
+    "\n"
+    "    bool     _force40MHz = false;"
+    +
+    "\n"
+    "    volatile bool _fallbackPending = false;"
+    +
+    "\n"
+    "    uint32_t _perfLastRxFrameCount = 0;"
+    +
+    "\n"
+    "    uint32_t _perfTxWithoutRx = 0;"
+)
+
+
+if (
+    "_force40MHz"
+    not in h
+):
+
+    h = replace_once(
+
+        h,
+
+        width_anchor,
+
+        width_patch,
+
+        "_connChanWidth member"
+    )
+
+
+print_ok(
+    "Adaptive performance state"
+)
+
+
+# ======================================================================
+#
+# 12.
+# ALLOCATE FALLBACK THREAD
+#
+# ======================================================================
+
+allocate_anchor = """    _manualScanTC = thread_call_allocate((thread_call_func_t)RTW88IEEE80211::manualScanTCFn,
+                                          (thread_call_param_t)this);"""
+
+
+allocate_patch = allocate_anchor + """
+
+    _fallbackTC =
+        thread_call_allocate(
+            (thread_call_func_t)
+            RTW88IEEE80211::fallbackTCFn,
+
+            (thread_call_param_t)
+            this
+        );
+
+
+    if (!_fallbackTC) {
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 "
+            "failed to allocate fallback thread-call\\n"
+        );
+
+        return false;
+    }"""
+
+
+if (
+    "_fallbackTC ="
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        allocate_anchor,
+
+        allocate_patch,
+
+        "manualScanTC allocation"
+    )
+
+
+print_ok(
+    "Fallback thread allocated"
+)
+
+
+# ======================================================================
+#
+# 13.
+# FREE FALLBACK THREAD
+#
+# ======================================================================
+
+free_anchor = (
+    "    if (_connectTC) { "
+    "thread_call_cancel(_connectTC); "
+    "thread_call_free(_connectTC); "
+    "_connectTC = nullptr; }"
+)
+
+
+free_patch = """    if (_fallbackTC) {
+
+        thread_call_cancel(
+            _fallbackTC
+        );
+
+        thread_call_free(
+            _fallbackTC
+        );
+
+        _fallbackTC =
+            nullptr;
+    }
+
+
+""" + free_anchor
+
+
+if (
+    "thread_call_free(_fallbackTC)"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        free_anchor,
+
+        free_patch,
+
+        "connect thread cleanup"
+    )
+
+
+print_ok(
+    "Fallback worker cleanup"
+)
+
+
+# ======================================================================
+#
+# 14.
+# START:
+# RESET ADAPTIVE STATE
+#
+# ======================================================================
+
+start_anchor = """    _state = RTW88_STATE_IDLE;
+    _scanReturnState = RTW88_STATE_IDLE;
+    RTW88_STAGE("IEEE80211::start complete — SUCCESS");"""
+
+
+start_patch = """    /*
+     * HP256G8 v8.4
+     *
+     * A new driver start gets one fresh
+     * opportunity to use 80 MHz.
+     */
+
+    _force40MHz =
+        false;
+
+
+    _fallbackPending =
+        false;
+
+
+    _perfLastRxFrameCount =
+        0;
+
+
+    _perfTxWithoutRx =
+        0;
+
+
+    IOLog(
+        "rtw88: HP256G8 v8.4 "
+        "fresh 80 MHz trial enabled\\n"
+    );
+
+
+    _state =
+        RTW88_STATE_IDLE;
+
+
+    _scanReturnState =
+        RTW88_STATE_IDLE;
+
+
+    RTW88_STAGE(
+        "IEEE80211::start complete — SUCCESS"
+    );"""
+
+
+if (
+    "fresh 80 MHz trial enabled"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        start_anchor,
+
+        start_patch,
+
+        "IEEE80211 start-state block"
+    )
+
+
+print_ok(
+    "Fresh adaptive state on driver start"
+)
+
+
+# ======================================================================
+#
+# 15.
+# VHT 80 MHZ:
+# ADAPTIVE SELECTION
+#
+# ======================================================================
+
+vht80_normal = (
+    "if (chip80 && "
+    "vhtWidth == 1 && "
+    "vhtSeg0 != 0) {"
+)
+
+
+vht80_disabled = (
+    "if (false && chip80 && "
+    "vhtWidth == 1 && "
+    "vhtSeg0 != 0) {"
+)
+
+
+vht80_adaptive = (
+    "if (!_force40MHz && "
+    "chip80 && "
+    "vhtWidth == 1 && "
+    "vhtSeg0 != 0) {"
+)
+
+
+if (
+    vht80_adaptive
+    not in c
+):
+
+    if (
+        vht80_disabled
+        in c
+    ):
+
+        c = c.replace(
+
+            vht80_disabled,
+
+            vht80_adaptive,
+
+            1
+        )
+
+    elif (
+        vht80_normal
+        in c
+    ):
+
+        c = c.replace(
+
+            vht80_normal,
+
+            vht80_adaptive,
+
+            1
+        )
+
+    else:
+
+        raise SystemExit(
+            "ERROR: VHT80 condition not found"
+        )
+
+
+print_ok(
+    "Adaptive VHT80 selection"
+)
+
+
+# ======================================================================
+#
+# 16.
+# BUILD IDENTIFICATION
+#
+# ======================================================================
+
+chandef_anchor = (
+    '    IOLog("rtw88: connected chandef: '
+    '%u MHz (primary=%u cf1=%u)\\n",'
+)
+
+
+chandef_patch = (
+    '    IOLog('
+    '"rtw88: HP256G8 v8.4 '
+    'Adaptive Performance active '
+    'safe40=%u\\n", '
+    '_force40MHz ? 1 : 0);'
+    '\n'
+    +
+    chandef_anchor
+)
+
+
+if (
+    "HP256G8 v8.4 Adaptive Performance active"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        chandef_anchor,
+
+        chandef_patch,
+
+        "connected chandef log"
+    )
+
+
+print_ok(
+    "v8.4 runtime identification"
+)
+
+
+# ======================================================================
+#
+# 17.
+# FALLBACK WORKER
+#
+# ======================================================================
+
+tx_section_anchor = """/* ------------------------------------------------------------------ */
+/*  TX path: Ethernet → 802.11 data frame                              */
+/* ------------------------------------------------------------------ */"""
+
+
+fallback_implementation = r'''
+/* ================================================================== */
+/* HP256G8 v8.4 Adaptive Performance                                  */
+/* ================================================================== */
+
+void RTW88IEEE80211::fallbackTCFn(
+    thread_call_param_t self,
+    thread_call_param_t)
+{
+    RTW88IEEE80211 *obj =
+        (RTW88IEEE80211 *)
+        self;
+
+
+    if (!obj)
+        return;
+
+
+    obj->runFallback40MHz();
+}
+
+
+/* ------------------------------------------------------------------ */
+
+void RTW88IEEE80211::scheduleFallback40MHz()
+{
+    /*
+     * Never queue more than one fallback.
+     */
+
+    if (_fallbackPending)
+        return;
+
+
+    /*
+     * Already in Safe mode.
+     */
+
+    if (_force40MHz)
+        return;
+
+
+    /*
+     * Only necessary for a live 80 MHz association.
+     */
+
+    if (
+        _state !=
+        RTW88_STATE_CONNECTED
+    )
+        return;
+
+
+    if (
+        _connChanWidth !=
+        80
+    )
+        return;
+
+
+    _fallbackPending =
+        true;
+
+
+    IOLog(
+        "rtw88: HP256G8 v8.4 "
+        "scheduling 80->40 reconnect "
+        "rssi=%d txNoRx=%u rxFrames=%u\n",
+
+        _rssi,
+
+        _perfTxWithoutRx,
+
+        _rxFrameCount
+    );
+
+
+    if (_fallbackTC) {
+
+        thread_call_enter(
+            _fallbackTC
+        );
+
+    } else {
+
+        /*
+         * Never leave the flag locked if the
+         * thread call cannot be dispatched.
+         */
+
+        _fallbackPending =
+            false;
+    }
+}
+
+
+/* ------------------------------------------------------------------ */
+
+void RTW88IEEE80211::runFallback40MHz()
+{
+    /*
+     * This function intentionally does NOT
+     * retune an already-associated 80 MHz
+     * connection in-place.
+     *
+     * The v8.3 test showed that changing /
+     * keeping 80 MHz while the radio state
+     * had become unstable could leave:
+     *
+     * RSSI = 0
+     * data path broken
+     * state still connected
+     *
+     * v8.4 therefore performs a clean
+     * association rebuild through the normal
+     * Feixiao authentication path.
+     */
+
+
+    if (
+        _state !=
+        RTW88_STATE_CONNECTED
+    ) {
+
+        _fallbackPending =
+            false;
+
+        return;
+    }
+
+
+    if (
+        _connChanWidth !=
+        80
+    ) {
+
+        _fallbackPending =
+            false;
+
+        return;
+    }
+
+
+    if (
+        !_powered
+        ||
+        !_hw
+        ||
+        !_vif
+    ) {
+
+        _fallbackPending =
+            false;
+
+        return;
+    }
+
+
+    IOLog(
+        "rtw88: HP256G8 v8.4 "
+        "FALLBACK 80 -> 40 MHz reconnect BEGIN\n"
+    );
+
+
+    /*
+     * Sticky Safe mode until driver restart.
+     */
+
+    _force40MHz =
+        true;
+
+
+    /*
+     * Preserve the requested target BSS and
+     * WPA password.
+     *
+     * doDisconnect() is only used to clear
+     * association, STA and key state.
+     */
+
+    doDisconnect();
+
+
+    /*
+     * Let the Realtek firmware / hardware
+     * settle before re-authenticating.
+     */
+
+    IOSleep(
+        150
+    );
+
+
+    if (
+        !_powered
+        ||
+        !_hw
+        ||
+        !_vif
+    ) {
+
+        _fallbackPending =
+            false;
+
+        return;
+    }
+
+
+    /*
+     * Make the following authentication use
+     * the exact same normal connection path.
+     *
+     * setConnectedChandef() will see
+     * _force40MHz=true and therefore the
+     * VHT80 branch is skipped.
+     */
+
+    _state =
+        RTW88_STATE_AUTHENTICATING;
+
+
+    _perfLastRxFrameCount =
+        _rxFrameCount;
+
+
+    _perfTxWithoutRx =
+        0;
+
+
+    _fallbackPending =
+        false;
+
+
+    IOLog(
+        "rtw88: HP256G8 v8.4 "
+        "reconnecting in Safe 40 MHz mode\n"
+    );
+
+
+    /*
+     * Prefer the normal asynchronous connect
+     * worker already used by Feixiao.
+     */
+
+    if (_connectTC) {
+
+        thread_call_enter(
+            _connectTC
+        );
+
+    } else {
+
+        /*
+         * Defensive fallback.
+         */
+
+        doAuthenticate();
+    }
+}
+
+
+/* ================================================================== */
+
+'''
+
+
+if (
+    "void RTW88IEEE80211::runFallback40MHz()"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        tx_section_anchor,
+
+        fallback_implementation
+        +
+        tx_section_anchor,
+
+        "TX section"
+    )
+
+
+print_ok(
+    "Adaptive fallback worker implementation"
+)
+
+
+# ======================================================================
+#
+# 18.
+# OUTPUTPACKET:
+# PERFORMANCE WATCHDOG
+#
+# ======================================================================
+
+output_start = c.find(
+    "UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)"
+)
+
+
+if output_start < 0:
+
+    raise SystemExit(
+        "ERROR: outputPacket not found"
+    )
+
+
+output_end = c.find(
+
+    "/* ------------------------------------------------------------------ */\n"
+    "/*  RX path:",
+
+    output_start
+)
+
+
+if output_end < 0:
+
+    raise SystemExit(
+        "ERROR: RX section after outputPacket not found"
+    )
+
+
+current_output = c[
+    output_start:output_end
+]
+
+
+if (
+    "HP256G8 v8.4 performance watchdog"
+    not in current_output
+):
+
+    opening_brace = c.find(
+        "{",
+        output_start
+    )
+
+
+    if opening_brace < 0:
+
+        raise SystemExit(
+            "ERROR: outputPacket opening brace not found"
+        )
+
+
+    watchdog_code = r'''
+
+    /*
+     * HP256G8 v8.4 performance watchdog
+     *
+     * This watchdog is deliberately simple:
+     *
+     * - it only runs while CONNECTED
+     * - it only runs at 80 MHz
+     * - it does not manipulate the PCI/DMA path
+     * - it merely requests a safe reconnect
+     *
+     * Trigger 1:
+     * RSSI becomes invalid (0 or positive).
+     *
+     * Trigger 2:
+     * TX keeps occurring while the number of
+     * received frames does not move.
+     */
+
+    if (
+        _state ==
+            RTW88_STATE_CONNECTED
+        &&
+        _connChanWidth ==
+            80
+        &&
+        !_force40MHz
+    ) {
+
+        uint32_t currentRx =
+            _rxFrameCount;
+
+
+        if (
+            currentRx !=
+            _perfLastRxFrameCount
+        ) {
+
+            /*
+             * RX still alive.
+             */
+
+            _perfLastRxFrameCount =
+                currentRx;
+
+
+            _perfTxWithoutRx =
+                0;
+
+        } else {
+
+            /*
+             * TX is occurring but no RX frame
+             * has been observed since the
+             * previous TX call.
+             */
+
+            if (
+                _perfTxWithoutRx <
+                0xfffffff0U
+            ) {
+
+                _perfTxWithoutRx++;
+            }
+        }
+
+
+        bool invalidRssi =
+            (
+                _rssi >=
+                0
+            );
+
+
+        /*
+         * 256 provides more tolerance than the
+         * previous experimental 128 threshold.
+         *
+         * We do not want ordinary asymmetric
+         * traffic to trigger unnecessary
+         * reconnects.
+         */
+
+        bool rxStalled =
+            (
+                _perfTxWithoutRx >=
+                256
+            );
+
+
+        if (
+            invalidRssi
+            ||
+            rxStalled
+        ) {
+
+            IOLog(
+                "rtw88: HP256G8 v8.4 watchdog trigger "
+                "invalidRSSI=%u rxStalled=%u "
+                "rssi=%d txNoRx=%u rxFrames=%u\n",
+
+                invalidRssi ? 1 : 0,
+
+                rxStalled ? 1 : 0,
+
+                _rssi,
+
+                _perfTxWithoutRx,
+
+                _rxFrameCount
+            );
+
+
+            scheduleFallback40MHz();
+        }
+    }
+
+'''
+
+
+    c = (
+
+        c[:opening_brace + 1]
+
+        +
+
+        watchdog_code
+
+        +
+
+        c[opening_brace + 1:]
+    )
+
+
+print_ok(
+    "80 MHz RX/TX watchdog"
+)
+
+
+# ======================================================================
+#
+# 19.
+# DEAUTH WHILE 80 MHZ:
+# ARM SAFE 40 MODE
+#
+# ======================================================================
+
+deauth_anchor = """            clearKeys();
+            _txBaActive = false;"""
+
+
+deauth_patch = """            if (
+                _connChanWidth ==
+                80
+            ) {
+
+                /*
+                 * AP removed association while
+                 * operating in the mode that has
+                 * been unstable on this machine.
+                 *
+                 * Keep the next connection on the
+                 * safer 40 MHz path.
+                 */
+
+                _force40MHz =
+                    true;
+
+
+                IOLog(
+                    "rtw88: HP256G8 v8.4 "
+                    "deauth/disassoc at 80 MHz; "
+                    "Safe 40 MHz armed\\n"
+                );
+            }
+
+
+            clearKeys();
+
+            _txBaActive =
+                false;"""
+
+
+if (
+    "deauth/disassoc at 80 MHz"
+    not in c
+):
+
+    c = replace_once(
+
+        c,
+
+        deauth_anchor,
+
+        deauth_patch,
+
+        "deauth cleanup"
+    )
+
+
+print_ok(
+    "80 MHz deauth Safe-mode arming"
+)
+
+
+# ======================================================================
+#
+# 20.
+# TX FLOW CONTROL
+#
+# ======================================================================
+
+stall_128 = (
+    "static constexpr unsigned int "
+    "kRTW88TxStallAvail = 128;"
+)
+
+
+stall_96 = (
+    "static constexpr unsigned int "
+    "kRTW88TxStallAvail = 96;"
+)
+
+
+resume_192 = (
+    "static constexpr unsigned int "
+    "kRTW88TxResumeAvail = 192;"
+)
+
+
+resume_160 = (
+    "static constexpr unsigned int "
+    "kRTW88TxResumeAvail = 160;"
+)
+
+
+if stall_128 in p:
+
+    p = p.replace(
+
+        stall_128,
+
+        stall_96,
+
+        1
+    )
+
+
+if resume_192 in p:
+
+    p = p.replace(
+
+        resume_192,
+
+        resume_160,
+
+        1
+    )
+
+
+require(
+    p,
+
+    stall_96,
+
+    "TX stall threshold"
+)
+
+
+require(
+    p,
+
+    resume_160,
+
+    "TX resume threshold"
+)
+
+
+print_ok(
+    "TX thresholds 96/160"
+)
+
+
+# ======================================================================
+#
+# 21.
+# SAFE MACOS MBUF PATH
+#
+# ======================================================================
+
+inject_start = p.find(
+    "void RTW88PCIDevice::injectRxFrame(mbuf_t m)"
+)
+
+
+inject_end = p.find(
+
+    "/* ------------------------------------------------------------------ */\n"
+    "/*  DMA coherent allocation",
+
+    inject_start
+)
+
+
+if (
+    inject_start < 0
+    or
+    inject_end < 0
+):
+
+    raise SystemExit(
+        "ERROR: injectRxFrame boundaries missing"
+    )
+
+
+safe_inject = r'''void RTW88PCIDevice::injectRxFrame(mbuf_t m)
+{
+    /*
+     * Release deferred DMA objects on the
+     * normal serialized path.
+     */
+
+    drainPendingFree();
+
+
+    /*
+     * Never inject while the macOS network
+     * interface is unavailable.
+     */
+
+    if (
+        !_iface
+        ||
+        !_enabled
+    ) {
+
+        freePacket(
+            m
+        );
+
+        return;
+    }
+
+
+    /*
+     * ================================================================
+     * HP256G8 v8.4 SAFE MBUF
+     * ================================================================
+     *
+     * The previous kernel panic was:
+     *
+     * m_sum16:
+     * mbuf real length ~1464
+     * requested checksum length ~44037
+     *
+     * Therefore this function must NEVER
+     * deliver a structurally inconsistent
+     * mbuf chain to XNU.
+     */
+
+    const size_t kMinFrame =
+        14;
+
+
+    /*
+     * Keep a conservative upper bound.
+     *
+     * Standard Ethernet MTU traffic is well
+     * below this value.
+     */
+
+    const size_t kMaxFrame =
+        4096;
+
+
+    /*
+     * A normal packet should not arrive as
+     * an excessive mbuf chain.
+     */
+
+    const unsigned int kMaxSegments =
+        32;
+
+
+    size_t packetLength =
+        mbuf_pkthdr_len(
+            m
+        );
+
+
+    size_t firstLength =
+        mbuf_len(
+            m
+        );
+
+
+    size_t chainLength =
+        0;
+
+
+    unsigned int segments =
+        0;
+
+
+    bool malformed =
+        false;
+
+
+    /*
+     * Sum the REAL amount of data available
+     * across all mbufs.
+     */
+
+    for (
+        mbuf_t segment = m;
+        segment != nullptr;
+        segment = mbuf_next(segment)
+    ) {
+
+        size_t length =
+            mbuf_len(
+                segment
+            );
+
+
+        segments++;
+
+
+        /*
+         * Impossible / suspicious segmentation.
+         */
+
+        if (
+            segments >
+            kMaxSegments
+        ) {
+
+            malformed =
+                true;
+
+            break;
+        }
+
+
+        /*
+         * One segment is already too large.
+         */
+
+        if (
+            length >
+            kMaxFrame
+        ) {
+
+            malformed =
+                true;
+
+            break;
+        }
+
+
+        /*
+         * Prevent overflow and prevent total
+         * chain size from exceeding our bound.
+         */
+
+        if (
+            chainLength >
+            (
+                kMaxFrame
+                -
+                length
+            )
+        ) {
+
+            malformed =
+                true;
+
+            break;
+        }
+
+
+        chainLength +=
+            length;
+    }
+
+
+    /*
+     * ================================================================
+     * FINAL MBUF VALIDATION
+     * ================================================================
+     */
+
+    if (
+        malformed
+        ||
+        packetLength <
+            kMinFrame
+        ||
+        packetLength >
+            kMaxFrame
+        ||
+        firstLength <
+            kMinFrame
+        ||
+        firstLength >
+            kMaxFrame
+        ||
+        chainLength !=
+            packetLength
+    ) {
+
+        IOLog(
+            "rtw88: HP256G8 v8.4 SAFE MBUF drop "
+            "pkthdr=%zu first=%zu chain=%zu segs=%u\n",
+
+            packetLength,
+
+            firstLength,
+
+            chainLength,
+
+            segments
+        );
+
+
+        freePacket(
+            m
+        );
+
+
+        return;
+    }
+
+
+    /*
+     * ================================================================
+     * CONSERVATIVE XNU INPUT
+     * ================================================================
+     *
+     * Do NOT restore the experimental v8 RX
+     * batching.
+     *
+     * The stable v8.2 behavior delivered each
+     * validated packet and immediately flushed
+     * the network input queue.
+     */
+
+    _iface->inputPacket(
+
+        m,
+
+        0,
+
+        IONetworkInterface::
+        kInputOptionQueuePacket
+    );
+
+
+    _iface->flushInputQueue();
+
+
+    /*
+     * Update standard network statistics.
+     */
+
+    IONetworkData *nd =
+        _iface->getNetworkData(
+            kIONetworkStatsKey
+        );
+
+
+    if (nd) {
+
+        IONetworkStats *stats =
+            (
+                IONetworkStats *
+            )
+            nd->getBuffer();
+
+
+        if (stats) {
+
+            stats->inputPackets++;
+        }
+    }
+}
+
+
+'''
+
+
+p = (
+
+    p[:inject_start]
+
+    +
+
+    safe_inject
+
+    +
+
+    p[inject_end:]
+)
+
+
+# ======================================================================
+#
+# 22.
+# VERIFY RX BATCHING IS OFF
+#
+# ======================================================================
+
+if (
+    "_rxQueued = true;"
+    in p
+):
+
+    raise SystemExit(
+        "ERROR: unsafe RX batching still present"
+    )
+
+
+print_ok(
+    "RX batching disabled"
+)
+
+
+# ======================================================================
+#
+# 23.
+# SAFE DMA TAG CHECK
+#
+# ======================================================================
+
+dma_start = lp.find(
+    "static void rtw_pci_dma_check("
+)
+
+
+if (
+    dma_start <
+    0
+):
+
+    dma_start = lp.find(
+        "static bool rtw_pci_dma_check("
+    )
+
+
+dma_end = lp.find(
+
+    "static u32 __pci_get_hw_tx_ring_rp(",
+
+    dma_start
+)
+
+
+if (
+    dma_start <
+    0
+    or
+    dma_end <
+    0
+):
+
+    raise SystemExit(
+        "ERROR: rtw_pci_dma_check boundaries missing"
+    )
+
+
+safe_dma_function = r'''static bool rtw_pci_dma_check(
+        struct rtw_dev *rtwdev,
+        struct rtw_pci_rx_ring *rx_ring,
+        u32 idx)
+{
+    struct rtw_pci *rtwpci =
+        (
+            struct rtw_pci *
+        )
+        rtwdev->priv;
+
+
+    const struct rtw_chip_info *chip =
+        rtwdev->chip;
+
+
+    struct rtw_pci_rx_buffer_desc *buf_desc;
+
+
+    u32 desc_sz =
+        chip->rx_buf_desc_sz;
+
+
+    /*
+     * Software completion sequence.
+     */
+
+    u16 expected =
+        rtwpci->rx_tag;
+
+
+    /*
+     * Hardware value.
+     */
+
+    u16 observed =
+        0;
+
+
+    int i;
+
+
+    /*
+     * Diagnostics only.
+     */
+
+    static u32 mismatch_count =
+        0;
+
+
+    static u32 recovery_count =
+        0;
+
+
+    /*
+     * Locate RX buffer descriptor.
+     */
+
+    buf_desc =
+        (
+            struct rtw_pci_rx_buffer_desc *
+        )
+        (
+            rx_ring->r.head
+            +
+            idx * desc_sz
+        );
+
+
+    /*
+     * ================================================================
+     * HP256G8 v8.4 SAFE RESYNC
+     * ================================================================
+     *
+     * The hardware and software RX completion
+     * tags can briefly be out of phase.
+     *
+     * Wait up to:
+     *
+     * 100 loops x 2 us = 200 us
+     *
+     * for the expected value.
+     */
+
+    for (
+        i = 0;
+        i < 100;
+        i++
+    ) {
+
+        observed =
+            le16_to_cpu(
+                buf_desc->total_pkt_size
+            );
+
+
+        if (
+            observed ==
+            expected
+        ) {
+
+            /*
+             * Good descriptor.
+             *
+             * Advance normal software sequence
+             * and ALLOW caller to process it.
+             */
+
+            rtwpci->rx_tag =
+                (
+                    expected
+                    +
+                    1
+                )
+                %
+                RX_TAG_MAX;
+
+
+            return true;
+        }
+
+
+        udelay(
+            2
+        );
+    }
+
+
+    /*
+     * ================================================================
+     * MISMATCH REMAINS
+     * ================================================================
+     *
+     * CRITICAL SAFETY RULE:
+     *
+     * This CURRENT descriptor MUST NOT be
+     * parsed.
+     *
+     * The caller sees false and skips:
+     *
+     * dma_sync_single_for_cpu
+     * rx-desc parsing
+     * skb construction
+     * mbuf injection
+     */
+
+    mismatch_count++;
+
+
+    u16 delta =
+        0;
+
+
+    /*
+     * Calculate circular sequence distance.
+     */
+
+    if (
+        expected >=
+        observed
+    ) {
+
+        delta =
+            expected
+            -
+            observed;
+
+    } else {
+
+        delta =
+            (
+                expected
+                +
+                RX_TAG_MAX
+            )
+            -
+            observed;
+    }
+
+
+    /*
+     * ================================================================
+     * BOUNDED SAFE RESYNC
+     * ================================================================
+     *
+     * User logs on this specific RTL8821CE
+     * showed a stable difference:
+     *
+     * expected - observed = 7
+     *
+     * Therefore a small coherent distance can
+     * be accepted as a sequence-alignment hint
+     * ONLY FOR THE NEXT DESCRIPTOR.
+     */
+
+    if (
+        delta >
+        0
+        &&
+        delta <=
+        32
+    ) {
+
+        /*
+         * Re-align expected tag for NEXT slot.
+         *
+         * The CURRENT descriptor remains
+         * rejected because this function still
+         * returns false.
+         */
+
+        rtwpci->rx_tag =
+            (
+                observed
+                +
+                1
+            )
+            %
+            RX_TAG_MAX;
+
+
+        recovery_count++;
+
+
+        /*
+         * Avoid flooding dmesg.
+         */
+
+        if (
+            recovery_count ==
+            1
+            ||
+            (
+                recovery_count
+                &
+                0xff
+            )
+            ==
+            0
+        ) {
+
+            rtw_warn(
+                rtwdev,
+
+                "HP256G8 v8.4 SAFE RESYNC "
+                "drop current descriptor "
+                "expected=%u observed=%u "
+                "delta=%u next=%u count=%u\n",
+
+                expected,
+
+                observed,
+
+                delta,
+
+                rtwpci->rx_tag,
+
+                recovery_count
+            );
+        }
+
+    } else {
+
+        /*
+         * ============================================================
+         * SUSPICIOUS / LARGE MISMATCH
+         * ============================================================
+         *
+         * Do NOT trust observed as an alignment
+         * source.
+         *
+         * Advance conservatively using software
+         * sequence only.
+         */
+
+        rtwpci->rx_tag =
+            (
+                expected
+                +
+                1
+            )
+            %
+            RX_TAG_MAX;
+
+
+        if (
+            mismatch_count ==
+            1
+            ||
+            (
+                mismatch_count
+                &
+                0xff
+            )
+            ==
+            0
+        ) {
+
+            rtw_warn(
+                rtwdev,
+
+                "HP256G8 v8.4 SAFE RX reject "
+                "expected=%u observed=%u "
+                "delta=%u count=%u\n",
+
+                expected,
+
+                observed,
+
+                delta,
+
+                mismatch_count
+            );
+        }
+    }
+
+
+    /*
+     * Caller MUST discard current slot.
+     */
+
+    return false;
+}
+
+
+'''
+
+
+lp = (
+
+    lp[:dma_start]
+
+    +
+
+    safe_dma_function
+
+    +
+
+    lp[dma_end:]
+)
+
+
+print_ok(
+    "Safe RX descriptor-tag validation"
+)
+
+
+# ======================================================================
+#
+# 24.
+# BLOCK INVALID DESCRIPTOR BEFORE PARSE
+#
+# ======================================================================
+
+old_rx_loop = (
+    "\twhile (count--) {\n"
+    "\t\trtw_pci_dma_check(rtwdev, ring, cur_rp);\n"
+    "\t\tskb = ring->buf[cur_rp];\n"
+    "\t\tdma = *((dma_addr_t *)skb->cb);\n"
+    "\t\tdma_sync_single_for_cpu(rtwdev->dev, dma, "
+    "RTK_PCI_RX_BUF_SIZE,\n"
+    "\t\t\t\t\tDMA_FROM_DEVICE);\n"
+    "\t\trx_desc = skb->data;\n"
+)
+
+
+new_rx_loop = (
+    "\twhile (count--) {\n"
+    "\t\tskb = ring->buf[cur_rp];\n"
+    "\t\tdma = *((dma_addr_t *)skb->cb);\n"
+    "\n"
+    "\t\t/* HP256G8 v8.4: reject bad descriptor before parsing. */\n"
+    "\t\tif (!rtw_pci_dma_check(rtwdev, ring, cur_rp))\n"
+    "\t\t\tgoto next_rp;\n"
+    "\n"
+    "\t\tdma_sync_single_for_cpu(rtwdev->dev, dma, "
+    "RTK_PCI_RX_BUF_SIZE,\n"
+    "\t\t\t\t\tDMA_FROM_DEVICE);\n"
+    "\t\trx_desc = skb->data;\n"
+)
+
+
+safe_call_marker = (
+    "if (!rtw_pci_dma_check("
+    "rtwdev, ring, cur_rp))"
+)
+
+
+if (
+    safe_call_marker
+    not in lp
+):
+
+    lp = replace_once(
+
+        lp,
+
+        old_rx_loop,
+
+        new_rx_loop,
+
+        "RX processing loop"
+    )
+
+
+print_ok(
+    "Rejected descriptors blocked before RX parsing"
+)
+
+
+# ======================================================================
+#
+# 25.
+# RX PACKET LENGTH BOUND CHECK
+#
+# ======================================================================
+
+rx_length_marker = (
+    "HP256G8 v8.4 invalid RX length"
+)
+
+
+if (
+    rx_length_marker
+    not in lp
+):
+
+    old_length_block = (
+        "\t\t/* offset from rx_desc to payload */\n"
+        "\t\tpkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +\n"
+        "\t\t\t     pkt_stat.shift;\n"
+        "\n"
+        "\t\t/* allocate a new skb for this frame,\n"
+        "\t\t * discard the frame if none available\n"
+        "\t\t */\n"
+        "\t\tnew_len = pkt_stat.pkt_len + pkt_offset;\n"
+    )
+
+
+    new_length_block = (
+        "\t\t/* offset from rx_desc to payload */\n"
+        "\t\tpkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +\n"
+        "\t\t\t     pkt_stat.shift;\n"
+        "\n"
+        "\t\t/* HP256G8 v8.4 DMA buffer bounds. */\n"
+        "\t\tif (!pkt_stat.pkt_len ||\n"
+        "\t\t    pkt_offset >= RTK_PCI_RX_BUF_SIZE ||\n"
+        "\t\t    pkt_stat.pkt_len > "
+        "RTK_PCI_RX_BUF_SIZE - pkt_offset) {\n"
+        "\t\t\trtw_warn(rtwdev,\n"
+        "\t\t\t\t \"HP256G8 v8.4 invalid RX length "
+        "pkt=%u off=%u\\n\",\n"
+        "\t\t\t\t pkt_stat.pkt_len, pkt_offset);\n"
+        "\t\t\tgoto next_rp;\n"
+        "\t\t}\n"
+        "\n"
+        "\t\t/* allocate a new skb for this frame,\n"
+        "\t\t * discard the frame if none available\n"
+        "\t\t */\n"
+        "\t\tnew_len = pkt_stat.pkt_len + pkt_offset;\n"
+    )
+
+
+    lp = replace_once(
+
+        lp,
+
+        old_length_block,
+
+        new_length_block,
+
+        "RX length calculation"
+    )
+
+
+print_ok(
+    "RX DMA buffer length validation"
+)
+
+
+# ======================================================================
+#
+# 26.
+# VERIFY OLD PCI TIMEOUT LOOP REMOVED FROM DMA CHECK
+#
+# ======================================================================
+
+verify_dma_start = lp.find(
+    "static bool rtw_pci_dma_check("
+)
+
+
+verify_dma_end = lp.find(
+
+    "static u32 __pci_get_hw_tx_ring_rp(",
+
+    verify_dma_start
+)
+
+
+if (
+    verify_dma_start < 0
+    or
+    verify_dma_end < 0
+):
+
+    raise SystemExit(
+        "ERROR: final DMA function boundaries invalid"
+    )
+
+
+verify_dma = lp[
+    verify_dma_start:
+    verify_dma_end
+]
+
+
+if (
+    "pci bus timeout, check dma status"
+    in verify_dma
+):
+
+    raise SystemExit(
+        "ERROR: original pci bus timeout path "
+        "still present inside DMA check"
+    )
+
+
+print_ok(
+    "Old DMA timeout loop removed from RX tag check"
+)
+
+
+# ======================================================================
+#
+# 27.
+# FINAL C++ VALIDATION
+#
+# ======================================================================
+
+cpp_combined = (
+    c
+    +
+    "\n"
+    +
+    h
+    +
+    "\n"
+    +
+    p
+)
+
+
+required_cpp_markers = (
+
+    "HP256G8 v8.4 M4 key_length=0",
+
+    "HP256G8 v8.4 M4 nonce zeroed",
+
+    "HP256G8 v8.4 received M3",
+
+    "sending EAPOL M4 before PTK install",
+
+    "M4 submitted, installing PTK",
+
+    "PTK/GTK installed after M4",
+
+    "WPA2 settle complete",
+
+    "Adaptive Performance active",
+
+    "_force40MHz",
+
+    "_fallbackPending",
+
+    "_fallbackTC",
+
+    "scheduleFallback40MHz",
+
+    "runFallback40MHz",
+
+    "performance watchdog",
+
+    "FALLBACK 80 -> 40 MHz reconnect BEGIN",
+
+    "reconnecting in Safe 40 MHz mode",
+
+    "deauth/disassoc at 80 MHz",
+
+    "HP256G8 v8.4 SAFE MBUF drop",
+
+    "startTxAggregation();",
+
+)
+
+
+for marker in required_cpp_markers:
+
+    require(
+
+        cpp_combined,
+
+        marker,
+
+        "final C++ marker"
+    )
+
+
+print_ok(
+    "Final C++ markers"
+)
+
+
+# ======================================================================
+#
+# 28.
+# FINAL DMA VALIDATION
+#
+# ======================================================================
+
+required_dma_markers = (
+
+    "static bool rtw_pci_dma_check(",
+
+    "HP256G8 v8.4 SAFE RESYNC",
+
+    "drop current descriptor",
+
+    "delta <= 32",
+
+    "observed",
+
+    "rtwpci->rx_tag",
+
+    "return false;",
+
+    safe_call_marker,
+
+    "HP256G8 v8.4 invalid RX length",
+
+)
+
+
+for marker in required_dma_markers:
+
+    require(
+
+        lp,
+
+        marker,
+
+        "final DMA marker"
+    )
+
+
+print_ok(
+    "Final Safe DMA markers"
+)
+
+
+# ======================================================================
+#
+# 29.
+# VERIFY NO UNSAFE V8 BATCHING
+#
+# ======================================================================
+
+if (
+    "_rxQueued = true;"
+    in p
+):
+
+    raise SystemExit(
+        "ERROR: experimental RX batching remains enabled"
+    )
+
+
+if (
+    "HP256G8 v8 RX tag resync"
+    in lp
+):
+
+    raise SystemExit(
+        "ERROR: original unsafe v8 current-descriptor "
+        "resync remains present"
+    )
+
+
+print_ok(
+    "Unsafe v8 RX paths absent"
+)
+
+
+# ======================================================================
+#
+# 30.
+# VERIFY 80 MHZ PATH
+#
+# ======================================================================
+
+require(
+
+    c,
+
+    vht80_adaptive,
+
+    "adaptive VHT80 path"
+)
+
+
+print_ok(
+    "VHT 80 MHz adaptive path enabled"
+)
+
+
+# ======================================================================
+#
+# 31.
+# WRITE SOURCES
+#
+# ======================================================================
+
+IEEE_CPP.write_text(
+    c
+)
+
+
+IEEE_HPP.write_text(
+    h
+)
+
+
+PCI_CPP.write_text(
+    p
+)
+
+
+COMPAT_C.write_text(
+    r
+)
+
+
+LINUX_PCI.write_text(
+    lp
+)
+
+
+# ======================================================================
+#
+# 32.
+# RELOAD WRITTEN FILES FOR FINAL CHECK
+#
+# ======================================================================
+
+final_c = IEEE_CPP.read_text()
+
+final_h = IEEE_HPP.read_text()
+
+final_p = PCI_CPP.read_text()
+
+final_r = COMPAT_C.read_text()
+
+final_lp = LINUX_PCI.read_text()
+
+
+# ======================================================================
+#
+# 33.
+# CHECK WRITTEN CONTENT
+#
+# ======================================================================
+
+require(
+
+    final_c,
+
+    "HP256G8 v8.4 Adaptive Performance active",
+
+    "written v8.4 identity"
+)
+
+
+require(
+
+    final_c,
+
+    "HP256G8 v8.4 M4 key_length=0",
+
+    "written WPA2 Key Length"
+)
+
+
+require(
+
+    final_c,
+
+    "HP256G8 v8.4 M4 nonce zeroed",
+
+    "written WPA2 nonce"
+)
+
+
+require(
+
+    final_c,
+
+    "HP256G8 v8.4 FALLBACK 80 -> 40 MHz reconnect BEGIN",
+
+    "written fallback worker"
+)
+
+
+require(
+
+    final_p,
+
+    "HP256G8 v8.4 SAFE MBUF drop",
+
+    "written Safe mbuf path"
+)
+
+
+require(
+
+    final_lp,
+
+    "HP256G8 v8.4 SAFE RESYNC",
+
+    "written Safe DMA path"
+)
+
+
+require(
+
+    final_lp,
+
+    "HP256G8 v8.4 invalid RX length",
+
+    "written RX length guard"
+)
+
+
+require(
+
+    final_r,
+
+    automatic_rate,
+
+    "written automatic rate control"
+)
+
+
+# ======================================================================
+#
+# 34.
+# FINAL REPORT
+#
+# ======================================================================
+
+print()
+
+print(
+    "=" * 78
+)
+
+print(
+    "HP256G8 RTL8821CE V8.4 PATCH APPLIED SUCCESSFULLY"
+)
+
+print(
+    "=" * 78
+)
+
+print(
+    "WPA2 M4 Key Length.................... OK"
+)
+
+print(
+    "WPA2 M4 nonce......................... OK"
+)
+
+print(
+    "M4 before PTK/GTK..................... OK"
+)
+
+print(
+    "WPA2 settle delay...................... OK"
+)
+
+print(
+    "TX A-MPDU.............................. OK"
+)
+
+print(
+    "Automatic firmware rate control........ OK"
+)
+
+print(
+    "TX serialization....................... OK"
+)
+
+print(
+    "Deferred DMA free....................... OK"
+)
+
+print(
+    "TX thresholds 96/160.................... OK"
+)
+
+print(
+    "Safe mbuf validation.................... OK"
+)
+
+print(
+    "RX batching............................. OFF"
+)
+
+print(
+    "Safe RX descriptor validation........... OK"
+)
+
+print(
+    "Bad current descriptor parsing.......... BLOCKED"
+)
+
+print(
+    "Bounded NEXT-tag resync.................. OK"
+)
+
+print(
+    "RX buffer-length validation.............. OK"
+)
+
+print(
+    "Initial VHT 80 MHz....................... ENABLED"
+)
+
+print(
+    "80 MHz RSSI watchdog..................... ENABLED"
+)
+
+print(
+    "80 MHz TX-without-RX watchdog............ ENABLED"
+)
+
+print(
+    "Automatic 80 -> 40 reconnect............. ENABLED"
+)
+
+print(
+    "40 MHz sticky Safe mode.................. ENABLED"
+)
+
+print(
+    "=" * 78
+)
+
+print()
+
+print(
+    "IMPORTANT:"
+)
+
+print(
+    "The >100 Mbps figure is a performance target."
+)
+
+print(
+    "The workflow cannot guarantee physical throughput."
+)
+
+print(
+    "Keep the known-stable v8.2 build as backup."
+)
+
+print()
