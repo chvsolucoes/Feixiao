@@ -1,0 +1,1155 @@
+name: Build HP256G8 RTL8821CE v8.6 Performance Unlock
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+  RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+  BUILD_NAME: Feixiao-HP256G8-v8.6-Performance-Unlock
+
+jobs:
+
+  build:
+
+    name: Build HP256G8 v8.6
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # ================================================================
+      # 01
+      # CHECKOUT FEIXIAO
+      # ================================================================
+
+      - name: Checkout Feixiao
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: ${{ env.FEIXIAO_REF }}
+          path: Feixiao
+          fetch-depth: 1
+          submodules: recursive
+
+
+      # ================================================================
+      # 02
+      # VALIDATE MACKERNELSDK
+      # ================================================================
+
+      - name: Validate MacKernelSDK
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "MACKERNELSDK"
+          echo "============================================================"
+
+          test -d Feixiao/MacKernelSDK
+          test -d Feixiao/MacKernelSDK/Headers
+
+          SDK_COMMIT="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
+
+          echo "MacKernelSDK:"
+          echo "${SDK_COMMIT}"
+
+          HEADER_COUNT="$(
+            find Feixiao/MacKernelSDK/Headers \
+              -type f \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          echo "Headers: ${HEADER_COUNT}"
+
+          if [ "${HEADER_COUNT}" -lt 100 ]; then
+            echo "ERROR: MacKernelSDK incomplete"
+            exit 1
+          fi
+
+          echo "MacKernelSDK: OK"
+
+
+      # ================================================================
+      # 03
+      # CLONE RTW88-STABLE
+      # ================================================================
+
+      - name: Clone matching rtw88-stable
+        shell: bash
+        run: |
+          set -eu
+
+          git clone \
+            https://github.com/thegwchr/rtw88-stable.git \
+            rtw88-stable
+
+          git \
+            -C rtw88-stable \
+            checkout \
+            "${RTW88_REF}"
+
+          echo
+          echo "============================================================"
+          echo "SOURCE COMMITS"
+          echo "============================================================"
+
+          echo "Feixiao:"
+          git -C Feixiao rev-parse HEAD
+
+          echo
+          echo "rtw88-stable:"
+          git -C rtw88-stable rev-parse HEAD
+
+
+      # ================================================================
+      # 04
+      # VALIDATE EXACT REVISIONS
+      # ================================================================
+
+      - name: Validate exact revisions
+        shell: bash
+        run: |
+          set -eu
+
+          FEIXIAO_ACTUAL="$(git -C Feixiao rev-parse HEAD)"
+          RTW88_ACTUAL="$(git -C rtw88-stable rev-parse HEAD)"
+
+          if [ "${FEIXIAO_ACTUAL}" != "${FEIXIAO_REF}" ]; then
+            echo "ERROR: wrong Feixiao commit"
+            exit 1
+          fi
+
+          if [ "${RTW88_ACTUAL}" != "${RTW88_REF}" ]; then
+            echo "ERROR: wrong rtw88-stable commit"
+            exit 1
+          fi
+
+          echo "Exact revisions: OK"
+
+
+      # ================================================================
+      # 05
+      # VALIDATE SOURCE FILES
+      # ================================================================
+
+      - name: Validate source files
+        shell: bash
+        run: |
+          set -eu
+
+          REQUIRED="
+          Feixiao/Makefile
+          Feixiao/src/kext/RTW88IEEE80211.cpp
+          Feixiao/src/kext/RTW88IEEE80211.hpp
+          Feixiao/src/kext/RTW88PCIDevice.cpp
+          Feixiao/src/kext/RTW88PCIDevice.hpp
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          "
+
+          for FILE in ${REQUIRED}
+          do
+            if [ ! -f "${FILE}" ]; then
+              echo "ERROR: missing ${FILE}"
+              exit 1
+            fi
+
+            echo "[OK] ${FILE}"
+          done
+
+
+      # ================================================================
+      # 06
+      # VALIDATE CURRENT STABLE PERFORMANCE FOUNDATION
+      # ================================================================
+
+      - name: Validate v8.5.3 performance foundation
+        shell: bash
+        run: |
+          set -eu
+
+          IEEE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+          PCIDEV="Feixiao/src/kext/RTW88PCIDevice.cpp"
+          COMPAT="Feixiao/src/compat/rtw88_compat.c"
+          MAIN="rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c"
+
+          echo
+          echo "============================================================"
+          echo "5 GHZ / VHT"
+          echo "============================================================"
+
+          grep -q "_connChanWidth = 20" "${IEEE}"
+          grep -q "_connChanWidth = 40" "${IEEE}"
+          grep -q "_connChanWidth = 80" "${IEEE}"
+
+          grep -q "NL80211_CHAN_WIDTH_80" "${IEEE}"
+
+          grep -q \
+            "chip80 && vhtWidth == 1 && vhtSeg0 != 0" \
+            "${IEEE}"
+
+          echo "20 MHz: OK"
+          echo "40 MHz: OK"
+          echo "80 MHz: OK"
+
+
+          echo
+          echo "============================================================"
+          echo "HT CAPABILITY"
+          echo "============================================================"
+
+          grep -q \
+            'if (_connChanWidth < 40)' \
+            "${IEEE}"
+
+          grep -q \
+            'IEEE80211_HT_CAP_SUP_WIDTH_20_40' \
+            "${IEEE}"
+
+          echo "HT40 conditional capability: OK"
+
+
+          echo
+          echo "============================================================"
+          echo "STA BANDWIDTH"
+          echo "============================================================"
+
+          grep -q \
+            '(_connChanWidth == 80) ? IEEE80211_STA_RX_BW_80' \
+            "${IEEE}"
+
+          grep -q \
+            'IEEE80211_STA_RX_BW_40' \
+            "${IEEE}"
+
+          echo "STA 80 MHz bandwidth path: OK"
+
+
+          echo
+          echo "============================================================"
+          echo "A-MPDU"
+          echo "============================================================"
+
+          grep -q "startTxAggregation" "${IEEE}"
+          grep -q "sendAddbaRequest" "${IEEE}"
+          grep -q "rxReorderInput" "${IEEE}"
+
+          echo "TX A-MPDU: OK"
+          echo "RX reorder: OK"
+
+
+          echo
+          echo "============================================================"
+          echo "WATCHDOG SAFE MODE"
+          echo "============================================================"
+
+          grep -q \
+            'bool rtw88_disable_watchdog_work = true;' \
+            "${COMPAT}"
+
+          grep -q \
+            'if (rtw88_disable_watchdog_work)' \
+            "${MAIN}"
+
+          grep -q \
+            'rtw_hci_dynamic_rx_agg' \
+            "${MAIN}"
+
+          echo "Existing diagnostic watchdog mode found."
+
+
+          echo
+          echo "============================================================"
+          echo "TX FLOW CONTROL"
+          echo "============================================================"
+
+          grep -q \
+            'kRTW88TxStallAvail = 96;' \
+            "${PCIDEV}"
+
+          grep -q \
+            'kRTW88TxResumeAvail = 160;' \
+            "${PCIDEV}"
+
+          echo "Original TX thresholds 96/160: OK"
+
+
+      # ================================================================
+      # 07
+      # PERFORMANCE PATCH
+      #
+      # IMPORTANT:
+      #
+      # Do NOT re-enable full PHY dynamic mechanism.
+      #
+      # Keep RF / DPK / power-tracking diagnostic bypass active,
+      # but allow dynamic RX aggregation while connected.
+      #
+      # ================================================================
+
+      - name: Apply v8.6 safe dynamic RX aggregation
+        shell: bash
+        run: |
+          set -eu
+
+          cd rtw88-stable
+
+          cat > /tmp/v86-rx-aggregation.patch <<'PATCH'
+          diff --git a/drivers/net/wireless/realtek/rtw88/main.c b/drivers/net/wireless/realtek/rtw88/main.c
+          --- a/drivers/net/wireless/realtek/rtw88/main.c
+          +++ b/drivers/net/wireless/realtek/rtw88/main.c
+          @@ -250,9 +250,35 @@ static void rtw_watch_dog_work(struct work_struct *work)
+           	ieee80211_queue_delayed_work(rtwdev->hw, &rtwdev->watch_dog_work,
+           				     RTW_WATCH_DOG_DELAY_TIME);
+           
+          -	/* Diagnostic: skip all RF-dynamic work + coex queries. */
+          -	if (rtw88_disable_watchdog_work)
+          +	/*
+          +	 * macOS / HP256G8 v8.6 performance-safe mode.
+          +	 *
+          +	 * Keep the RF-dynamic / DPK / power-tracking / coexistence
+          +	 * routines disabled because they were intentionally bypassed
+          +	 * while investigating PCIe/DMA stalls.
+          +	 *
+          +	 * Dynamic HCI RX aggregation is different: it directly affects
+          +	 * RX batching/throughput and does not require running the full
+          +	 * PHY dynamic-mechanism block.
+          +	 *
+          +	 * Preserve throughput accounting and enable RX aggregation while
+          +	 * an associated STA exists.
+          +	 */
+          +	if (rtw88_disable_watchdog_work) {
+          +		tx_unicast_mbps = stats->tx_unicast >> RTW_TP_SHIFT;
+          +		rx_unicast_mbps = stats->rx_unicast >> RTW_TP_SHIFT;
+          +
+          +		ewma_tp_add(&stats->tx_ewma_tp, tx_unicast_mbps);
+          +		ewma_tp_add(&stats->rx_ewma_tp, rx_unicast_mbps);
+          +		stats->tx_throughput = ewma_tp_read(&stats->tx_ewma_tp);
+          +		stats->rx_throughput = ewma_tp_read(&stats->rx_ewma_tp);
+          +
+          +		stats->tx_unicast = 0;
+          +		stats->rx_unicast = 0;
+          +		stats->tx_cnt = 0;
+          +		stats->rx_cnt = 0;
+          +
+          +		if (!test_bit(RTW_FLAG_SCANNING, rtwdev->flags) &&
+          +		    rtwdev->sta_cnt > 0)
+          +			rtw_hci_dynamic_rx_agg(rtwdev, true);
+          +
+          +		rtwdev->watch_dog_cnt++;
+           		goto unlock;
+          +	}
+           
+           	if (rtwdev->stats.tx_cnt > 100 || rtwdev->stats.rx_cnt > 100)
+           		set_bit(RTW_FLAG_BUSY_TRAFFIC, rtwdev->flags);
+          PATCH
+
+          git apply \
+            --check \
+            /tmp/v86-rx-aggregation.patch
+
+          git apply \
+            /tmp/v86-rx-aggregation.patch
+
+          echo
+          echo "============================================================"
+          echo "V8.6 DYNAMIC RX AGG PATCH"
+          echo "============================================================"
+
+          grep -n \
+            -A 40 \
+            -B 5 \
+            "HP256G8 v8.6 performance-safe mode" \
+            drivers/net/wireless/realtek/rtw88/main.c
+
+          echo
+          echo "Safe dynamic RX aggregation: OK"
+
+
+      # ================================================================
+      # 08
+      # TX PERFORMANCE
+      #
+      # Original:
+      # stall  = 96
+      # resume = 160
+      #
+      # v8.6:
+      # stall  = 64
+      # resume = 128
+      #
+      # Gives the BE ring more usable depth while still leaving
+      # substantial headroom before ENOSPC.
+      # ================================================================
+
+      - name: Tune v8.6 TX backpressure
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q \
+            'kRTW88TxStallAvail = 96;' \
+            "${FILE}"
+
+          grep -q \
+            'kRTW88TxResumeAvail = 160;' \
+            "${FILE}"
+
+          sed -i '' \
+            's/kRTW88TxStallAvail = 96;/kRTW88TxStallAvail = 64;/' \
+            "${FILE}"
+
+          sed -i '' \
+            's/kRTW88TxResumeAvail = 160;/kRTW88TxResumeAvail = 128;/' \
+            "${FILE}"
+
+          grep -q \
+            'kRTW88TxStallAvail = 64;' \
+            "${FILE}"
+
+          grep -q \
+            'kRTW88TxResumeAvail = 128;' \
+            "${FILE}"
+
+          echo
+          echo "============================================================"
+          echo "V8.6 TX BACKPRESSURE"
+          echo "============================================================"
+
+          grep -n \
+            'kRTW88Tx.*Avail' \
+            "${FILE}"
+
+          echo
+          echo "TX stall : 64"
+          echo "TX resume: 128"
+
+
+      # ================================================================
+      # 09
+      # DO NOT ENABLE FULL WATCHDOG
+      #
+      # This is intentional.
+      # ================================================================
+
+      - name: Preserve stable RF watchdog bypass
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/compat/rtw88_compat.c"
+
+          grep -q \
+            'bool rtw88_disable_watchdog_work = true;' \
+            "${FILE}"
+
+          if grep -q \
+            'bool rtw88_disable_watchdog_work = false;' \
+            "${FILE}"
+          then
+            echo "ERROR: full watchdog was accidentally enabled"
+            exit 1
+          fi
+
+          echo
+          echo "Full RF dynamic watchdog remains disabled."
+          echo "This preserves v8.5.3 stability."
+
+
+      # ================================================================
+      # 10
+      # VALIDATE RATE ADAPTATION
+      # ================================================================
+
+      - name: Validate full firmware rate adaptation
+        shell: bash
+        run: |
+          set -eu
+
+          COMPAT="Feixiao/src/compat/rtw88_compat.c"
+          MAIN="rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c"
+
+          echo
+          echo "============================================================"
+          echo "RATE ADAPTATION"
+          echo "============================================================"
+
+          grep -q \
+            'fix_rate = 0xFF' \
+            "${COMPAT}"
+
+          grep -q \
+            'RA_MASK_VHT_RATES_1SS' \
+            "${MAIN}"
+
+          grep -q \
+            'IEEE80211_STA_RX_BW_80' \
+            "${MAIN}"
+
+          grep -q \
+            'RTW_CHANNEL_WIDTH_80' \
+            "${MAIN}"
+
+          grep -q \
+            'RTW_RATEID_ARFR1_AC_1SS' \
+            "${MAIN}"
+
+          echo "No fixed 6 Mbps rate: OK"
+          echo "VHT 1SS RA mask: OK"
+          echo "80 MHz RA mode: OK"
+          echo "802.11ac 1SS rate ID: OK"
+
+
+      # ================================================================
+      # 11
+      # VALIDATE v8.6 PATCHES
+      # ================================================================
+
+      - name: Validate v8.6 performance patches
+        shell: bash
+        run: |
+          set -eu
+
+          MAIN="rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c"
+          PCI="Feixiao/src/kext/RTW88PCIDevice.cpp"
+          IEEE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          echo
+          echo "============================================================"
+          echo "V8.6 VALIDATION"
+          echo "============================================================"
+
+          grep -q \
+            'HP256G8 v8.6 performance-safe mode' \
+            "${MAIN}"
+
+          grep -q \
+            'rtw_hci_dynamic_rx_agg(rtwdev, true);' \
+            "${MAIN}"
+
+          grep -q \
+            'kRTW88TxStallAvail = 64;' \
+            "${PCI}"
+
+          grep -q \
+            'kRTW88TxResumeAvail = 128;' \
+            "${PCI}"
+
+          grep -q \
+            '_connChanWidth = 80;' \
+            "${IEEE}"
+
+          grep -q \
+            'startTxAggregation();' \
+            "${IEEE}"
+
+          echo
+          echo "[OK] Dynamic RX aggregation"
+          echo "[OK] TX ring tuning"
+          echo "[OK] VHT 80 MHz"
+          echo "[OK] TX A-MPDU"
+
+
+      # ================================================================
+      # 12
+      # SHOW SOURCE DIFF
+      # ================================================================
+
+      - name: Show v8.6 source changes
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "FEIXIAO DIFF"
+          echo "============================================================"
+
+          git \
+            -C Feixiao \
+            diff \
+            -- \
+            src/kext/RTW88PCIDevice.cpp
+
+          echo
+          echo "============================================================"
+          echo "RTW88-STABLE DIFF"
+          echo "============================================================"
+
+          git \
+            -C rtw88-stable \
+            diff \
+            -- \
+            drivers/net/wireless/realtek/rtw88/main.c
+
+
+      # ================================================================
+      # 13
+      # DOWNLOAD FIRMWARE
+      # ================================================================
+
+      - name: Download Realtek firmware
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao/firmware
+
+          FIRMWARE_FILES="
+          rtw8822b_fw.bin
+          rtw8822c_fw.bin
+          rtw8821c_fw.bin
+          rtw8821a_fw.bin
+          rtw8812a_fw.bin
+          rtw8814a_fw.bin
+          "
+
+          for FW in ${FIRMWARE_FILES}
+          do
+
+            if [ ! -s "${FW}" ]; then
+
+              echo "Downloading ${FW}"
+
+              curl \
+                --location \
+                --fail \
+                --retry 3 \
+                --retry-delay 2 \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/${FW}" \
+                --output "${FW}"
+
+            fi
+
+            if [ ! -s "${FW}" ]; then
+              echo "ERROR: missing firmware ${FW}"
+              exit 1
+            fi
+
+            ls -lh "${FW}"
+
+          done
+
+
+      # ================================================================
+      # 14
+      # VALIDATE RTL8821C FIRMWARE
+      # ================================================================
+
+      - name: Validate RTL8821C firmware
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/firmware/rtw8821c_fw.bin"
+
+          test -s "${FILE}"
+
+          SIZE="$(stat -f "%z" "${FILE}")"
+
+          echo "RTL8821C firmware size: ${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 50000 ]; then
+            echo "ERROR: suspicious RTL8821C firmware size"
+            exit 1
+          fi
+
+          echo "RTL8821C firmware: OK"
+
+
+      # ================================================================
+      # 15
+      # BUILD ENVIRONMENT
+      # ================================================================
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "MACOS"
+          echo "============================================================"
+
+          sw_vers
+
+          echo
+          echo "============================================================"
+          echo "XCODE"
+          echo "============================================================"
+
+          xcodebuild -version
+
+          echo
+          echo "============================================================"
+          echo "CLANG"
+          echo "============================================================"
+
+          clang --version
+
+          echo
+          echo "============================================================"
+          echo "MACKERNELSDK"
+          echo "============================================================"
+
+          git -C Feixiao/MacKernelSDK rev-parse HEAD
+
+
+      # ================================================================
+      # 16
+      # CLEAN
+      # ================================================================
+
+      - name: Clean previous build
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          make clean || true
+
+          rm -rf build/out || true
+
+          echo "Clean build: OK"
+
+
+      # ================================================================
+      # 17
+      # BUILD
+      # ================================================================
+
+      - name: Build HP256G8 v8.6
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "HP 256 G8"
+          echo "REALTEK RTL8821CE"
+          echo "V8.6 PERFORMANCE UNLOCK"
+          echo "============================================================"
+          echo
+          echo "VHT 80 MHz       : enabled"
+          echo "Firmware RA      : enabled"
+          echo "TX A-MPDU        : enabled"
+          echo "RX A-MPDU        : enabled"
+          echo "Dynamic RX agg   : enabled"
+          echo "TX stall/resume  : 64/128"
+          echo "Full RF watchdog : disabled for stability"
+          echo
+
+          make all
+
+
+      # ================================================================
+      # 18
+      # VALIDATE GENERATED FIRMWARE
+      # ================================================================
+
+      - name: Validate generated firmware source
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/compat/fw_blobs.c"
+
+          if [ ! -s "${FILE}" ]; then
+            echo "ERROR: fw_blobs.c missing"
+            exit 1
+          fi
+
+          SIZE="$(stat -f "%z" "${FILE}")"
+
+          echo "fw_blobs.c size: ${SIZE}"
+
+          if [ "${SIZE}" -lt 10000 ]; then
+            echo "ERROR: fw_blobs.c suspiciously small"
+            exit 1
+          fi
+
+          echo "Embedded firmware source: OK"
+
+
+      # ================================================================
+      # 19
+      # VERIFY BUILD OUTPUT
+      # ================================================================
+
+      - name: Verify v8.6 build output
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          test -d "${KEXT}"
+          test -f "${KEXT}/Contents/Info.plist"
+          test -f "${KEXT}/Contents/MacOS/rtw88"
+          test -f "${CTL}"
+
+          echo
+          echo "rtw88.kext: OK"
+          echo "rtw88ctl: OK"
+
+
+      # ================================================================
+      # 20
+      # INFO.PLIST
+      # ================================================================
+
+      - name: Validate Info.plist
+        shell: bash
+        run: |
+          set -eu
+
+          PLIST="Feixiao/build/out/rtw88.kext/Contents/Info.plist"
+
+          plutil \
+            -lint \
+            "${PLIST}"
+
+          echo
+          echo "Bundle ID:"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "${PLIST}"
+
+
+      # ================================================================
+      # 21
+      # MACH-O
+      # ================================================================
+
+      - name: Validate Mach-O binaries
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          echo
+          echo "============================================================"
+          echo "KEXT"
+          echo "============================================================"
+
+          file "${BIN}"
+
+          dwarfdump \
+            --uuid \
+            "${BIN}"
+
+          echo
+          echo "============================================================"
+          echo "RTW88CTL"
+          echo "============================================================"
+
+          file "${CTL}"
+
+
+      # ================================================================
+      # 22
+      # BINARY SIZE
+      # ================================================================
+
+      - name: Validate kext binary size
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+
+          SIZE="$(stat -f "%z" "${BIN}")"
+
+          echo "rtw88 binary size: ${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 500000 ]; then
+            echo "ERROR: unexpectedly small kext binary"
+            exit 1
+          fi
+
+
+      # ================================================================
+      # 23
+      # PREPARE ARTIFACT
+      # ================================================================
+
+      - name: Prepare v8.6 artifact
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          rm -rf "${OUT}"
+
+          mkdir -p "${OUT}"
+
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "${OUT}/"
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "${OUT}/"
+
+          chmod +x \
+            "${OUT}/rtw88ctl"
+
+          cp \
+            Feixiao/src/compat/fw_blobs.c \
+            "${OUT}/fw_blobs.c.build-proof"
+
+
+      # ================================================================
+      # 24
+      # BUILD INFORMATION
+      # ================================================================
+
+      - name: Create v8.6 build information
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          FEIXIAO_HASH="$(git -C Feixiao rev-parse HEAD)"
+          RTW88_HASH="$(git -C rtw88-stable rev-parse HEAD)"
+          MACKERNEL_HASH="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
+
+          cat > "${OUT}/BUILD-INFO.txt" <<EOF
+          ============================================================
+          HP 256 G8
+          REALTEK RTL8821CE
+          FEIXIAO V8.6 PERFORMANCE UNLOCK
+          ============================================================
+
+
+          BASE
+          ============================================================
+
+          Feixiao:
+          ${FEIXIAO_HASH}
+
+          rtw88-stable:
+          ${RTW88_HASH}
+
+          MacKernelSDK:
+          ${MACKERNEL_HASH}
+
+
+          HARDWARE
+          ============================================================
+
+          Realtek RTL8821CE
+
+          PCI:
+          10EC:C821
+
+          Radio:
+          1T1R / 1SS
+
+
+          RADIO
+          ============================================================
+
+          2.4 GHz:
+          enabled
+
+          5 GHz:
+          enabled
+
+          HT 20:
+          enabled
+
+          HT 40:
+          enabled
+
+          VHT 80:
+          enabled
+
+
+          RATE CONTROL
+          ============================================================
+
+          Fixed 6 Mbps:
+          disabled
+
+          Firmware rate adaptation:
+          enabled
+
+          VHT 1SS rate mask:
+          enabled
+
+
+          AGGREGATION
+          ============================================================
+
+          TX A-MPDU:
+          enabled
+
+          RX A-MPDU reorder:
+          enabled
+
+          Dynamic HCI RX aggregation:
+          ENABLED IN v8.6
+
+
+          TX FLOW CONTROL
+          ============================================================
+
+          v8.5.3:
+
+          stall  = 96
+          resume = 160
+
+
+          v8.6:
+
+          stall  = 64
+          resume = 128
+
+
+          WATCHDOG SAFETY
+          ============================================================
+
+          Full RF dynamic mechanism remains disabled.
+
+          The following potentially unstable periodic paths are NOT
+          re-enabled in v8.6:
+
+          RF dynamic mechanism
+          DPK tracking
+          power tracking
+          coexistence polling
+
+
+          Dynamic RX aggregation is allowed separately.
+
+
+          DMA
+          ============================================================
+
+          The DMA / bounce-buffer implementation is NOT modified.
+
+          This is intentional because v8.5.3 is currently stable.
+
+
+          PERFORMANCE TARGET
+          ============================================================
+
+          Goal:
+
+          >100 Mbps download
+          >100 Mbps upload
+
+          on:
+
+          5 GHz
+          VHT 80 MHz
+          strong signal
+          suitable AP
+
+
+          IMPORTANT
+          ============================================================
+
+          A gigabit Internet plan does NOT mean this RTL8821CE
+          1x1 adapter will deliver 1 Gbps over Wi-Fi.
+
+          This build aims to remove software bottlenecks while
+          preserving the stability of v8.5.3.
+
+          Throughput above 100 Mbps is a target, not a guarantee.
+
+          Always use rtw88.kext and rtw88ctl from this SAME artifact.
+
+          Keep v8.5.3 as backup.
+          EOF
+
+
+      # ================================================================
+      # 25
+      # SHA256
+      # ================================================================
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          cd "${OUT}"
+
+          shasum \
+            -a 256 \
+            rtw88ctl \
+            > SHA256SUMS.txt
+
+          find \
+            rtw88.kext \
+            -type f \
+            -exec shasum -a 256 {} \; \
+            >> SHA256SUMS.txt
+
+          cat SHA256SUMS.txt
+
+
+      # ================================================================
+      # 26
+      # PACKAGE
+      # ================================================================
+
+      - name: Package HP256G8 v8.6
+        shell: bash
+        run: |
+          set -eu
+
+          cd "${RUNNER_TEMP}"
+
+          ZIP="Feixiao_HP256G8_v8_6_Performance_Unlock.zip"
+
+          rm -f "${ZIP}"
+
+          zip \
+            -r \
+            "${ZIP}" \
+            "${BUILD_NAME}"
+
+          echo
+          echo "============================================================"
+          echo "V8.6 PACKAGE"
+          echo "============================================================"
+
+          ls -lh "${ZIP}"
+
+
+      # ================================================================
+      # 27
+      # UPLOAD
+      # ================================================================
+
+      - name: Upload HP256G8 v8.6 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-HP256G8-v8.6-Performance-Unlock
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_6_Performance_Unlock.zip
+          if-no-files-found: error
+          retention-days: 7
