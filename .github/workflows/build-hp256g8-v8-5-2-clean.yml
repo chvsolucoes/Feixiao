@@ -1,0 +1,1042 @@
+name: Build HP256G8 RTL8821CE v8.5.2 Clean
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+  RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+  BUILD_NAME: Feixiao-HP256G8-v8.5.2-Clean
+
+jobs:
+
+  build:
+
+    name: Build HP256G8 v8.5.2
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # ================================================================
+      # 01
+      # CHECKOUT FEIXIAO
+      # ================================================================
+
+      - name: Checkout Feixiao
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: ${{ env.FEIXIAO_REF }}
+          path: Feixiao
+          fetch-depth: 1
+          submodules: false
+
+
+      # ================================================================
+      # 02
+      # CLONE MATCHING RTW88-STABLE
+      # ================================================================
+
+      - name: Clone matching rtw88-stable
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "CLONING RTW88-STABLE"
+          echo "============================================================"
+          echo
+
+          git clone \
+            https://github.com/thegwchr/rtw88-stable.git \
+            rtw88-stable
+
+          git \
+            -C rtw88-stable \
+            checkout \
+            "${RTW88_REF}"
+
+          echo
+          echo "Feixiao:"
+          git -C Feixiao rev-parse HEAD
+
+          echo
+          echo "rtw88-stable:"
+          git -C rtw88-stable rev-parse HEAD
+
+
+      # ================================================================
+      # 03
+      # VALIDATE EXACT COMMITS
+      # ================================================================
+
+      - name: Validate exact source revisions
+        shell: bash
+        run: |
+          set -eu
+
+          FEIXIAO_ACTUAL="$(git -C Feixiao rev-parse HEAD)"
+          RTW88_ACTUAL="$(git -C rtw88-stable rev-parse HEAD)"
+
+          echo
+          echo "Expected Feixiao:"
+          echo "${FEIXIAO_REF}"
+
+          echo
+          echo "Actual Feixiao:"
+          echo "${FEIXIAO_ACTUAL}"
+
+          echo
+          echo "Expected rtw88-stable:"
+          echo "${RTW88_REF}"
+
+          echo
+          echo "Actual rtw88-stable:"
+          echo "${RTW88_ACTUAL}"
+
+          if [ "${FEIXIAO_ACTUAL}" != "${FEIXIAO_REF}" ]; then
+            echo "ERROR: wrong Feixiao revision"
+            exit 1
+          fi
+
+          if [ "${RTW88_ACTUAL}" != "${RTW88_REF}" ]; then
+            echo "ERROR: wrong rtw88-stable revision"
+            exit 1
+          fi
+
+          echo
+          echo "Source revisions: OK"
+
+
+      # ================================================================
+      # 04
+      # VALIDATE SOURCE TREE
+      # ================================================================
+
+      - name: Validate source tree
+        shell: bash
+        run: |
+          set -eu
+
+          FILES="
+          Feixiao/Makefile
+          Feixiao/src/kext/RTW88IEEE80211.cpp
+          Feixiao/src/kext/RTW88IEEE80211.hpp
+          Feixiao/src/kext/RTW88PCIDevice.cpp
+          Feixiao/src/kext/RTW88PCIDevice.hpp
+          Feixiao/src/kext/RTW88UserClient.cpp
+          Feixiao/src/kext/RTW88UserClient.hpp
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          "
+
+          for FILE in ${FILES}
+          do
+            if [ ! -f "${FILE}" ]; then
+              echo "ERROR: missing source file:"
+              echo "${FILE}"
+              exit 1
+            fi
+
+            echo "[OK] ${FILE}"
+          done
+
+          echo
+          echo "Source tree validation: OK"
+
+
+      # ================================================================
+      # 05
+      # VALIDATE RTL8821CE SUPPORT
+      # ================================================================
+
+      - name: Validate RTL8821CE support
+        shell: bash
+        run: |
+          set -eu
+
+          IEEE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+          PCI="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          echo
+          echo "============================================================"
+          echo "RTL8821CE VALIDATION"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            "rtw8821c_hw_spec" \
+            "${IEEE}"
+
+          grep -q \
+            "0xC821" \
+            "${PCI}"
+
+          grep -q \
+            "RTL8821CE" \
+            "${PCI}"
+
+          echo "RTL8821CE PCI ID C821: OK"
+          echo "RTL8821C hardware spec: OK"
+
+
+      # ================================================================
+      # 06
+      # VALIDATE NATIVE CHANNEL WIDTH SUPPORT
+      # ================================================================
+
+      - name: Validate 20 40 80 MHz implementation
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          echo
+          echo "============================================================"
+          echo "CHANNEL WIDTH VALIDATION"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            "NL80211_CHAN_WIDTH_20_NOHT" \
+            "${FILE}"
+
+          grep -q \
+            "NL80211_CHAN_WIDTH_40" \
+            "${FILE}"
+
+          grep -q \
+            "NL80211_CHAN_WIDTH_80" \
+            "${FILE}"
+
+          grep -q \
+            "_connChanWidth = 20" \
+            "${FILE}"
+
+          grep -q \
+            "_connChanWidth = 40" \
+            "${FILE}"
+
+          grep -q \
+            "_connChanWidth = 80" \
+            "${FILE}"
+
+          grep -q \
+            "chip80 && vhtWidth == 1 && vhtSeg0 != 0" \
+            "${FILE}"
+
+          echo "20 MHz: OK"
+          echo "40 MHz: OK"
+          echo "80 MHz: OK"
+          echo "VHT operation parsing: OK"
+
+
+      # ================================================================
+      # 07
+      # VALIDATE A-MPDU SUPPORT
+      # ================================================================
+
+      - name: Validate A-MPDU implementation
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+          HEADER="Feixiao/src/kext/RTW88IEEE80211.hpp"
+
+          echo
+          echo "============================================================"
+          echo "A-MPDU VALIDATION"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            "startTxAggregation" \
+            "${FILE}"
+
+          grep -q \
+            "sendAddbaRequest" \
+            "${FILE}"
+
+          grep -q \
+            "sendAddbaResponse" \
+            "${FILE}"
+
+          grep -q \
+            "handleBackAction" \
+            "${FILE}"
+
+          grep -q \
+            "_txBaActive" \
+            "${HEADER}"
+
+          grep -q \
+            "kRxBaMaxBuf" \
+            "${HEADER}"
+
+          grep -q \
+            "rxReorderInput" \
+            "${FILE}"
+
+          echo "TX A-MPDU: OK"
+          echo "RX A-MPDU reorder: OK"
+          echo "ADDBA negotiation: OK"
+
+
+      # ================================================================
+      # 08
+      # VALIDATE WPA2 IMPLEMENTATION
+      # ================================================================
+
+      - name: Validate WPA2 implementation
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          echo
+          echo "============================================================"
+          echo "WPA2 VALIDATION"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            "derivePMK" \
+            "${FILE}"
+
+          grep -q \
+            "derivePTK" \
+            "${FILE}"
+
+          grep -q \
+            "handleEAPOL" \
+            "${FILE}"
+
+          grep -q \
+            "sendEAPOLKey" \
+            "${FILE}"
+
+          grep -q \
+            "installKey" \
+            "${FILE}"
+
+          grep -q \
+            "_ptkConf" \
+            "${FILE}"
+
+          grep -q \
+            "_gtkConf" \
+            "${FILE}"
+
+          echo "PMK: OK"
+          echo "PTK: OK"
+          echo "EAPOL: OK"
+          echo "PTK/GTK installation: OK"
+
+
+      # ================================================================
+      # 09
+      # VALIDATE DMA IMPLEMENTATION
+      # ================================================================
+
+      - name: Validate macOS DMA implementation
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          echo
+          echo "============================================================"
+          echo "DMA VALIDATION"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            "compat_dma_alloc" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_free" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_map" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_unmap" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_sync_cpu" \
+            "${FILE}"
+
+          grep -q \
+            "syncBounceForCpu" \
+            "${FILE}"
+
+          grep -q \
+            "freeCoherentByPhys" \
+            "${FILE}"
+
+          echo "DMA coherent allocation: OK"
+          echo "DMA bounce buffer: OK"
+          echo "DMA RX synchronization: OK"
+
+
+      # ================================================================
+      # 10
+      # CHECK PCI BUS MASTERING
+      # ================================================================
+
+      - name: Validate PCI bus mastering
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q \
+            "_pciDev->setBusMasterEnable(true)" \
+            "${FILE}"
+
+          grep -q \
+            "_pciDev->setMemoryEnable(true)" \
+            "${FILE}"
+
+          echo
+          echo "PCI Bus Master: enabled by driver"
+          echo "PCI Memory Space: enabled by driver"
+
+
+      # ================================================================
+      # 11
+      # CHECK TX FLOW CONTROL
+      # ================================================================
+
+      - name: Validate TX flow control
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q \
+            "kRTW88TxStallAvail" \
+            "${FILE}"
+
+          grep -q \
+            "kRTW88TxResumeAvail" \
+            "${FILE}"
+
+          grep -q \
+            "resumeTxIfStalled" \
+            "${FILE}"
+
+          echo
+          echo "TX flow control implementation: OK"
+
+
+      # ================================================================
+      # 12
+      # VERIFY NO V8.5 GENERATED SOURCE CONTAMINATION
+      #
+      # This workflow starts CLEAN every run.
+      # ================================================================
+
+      - name: Verify clean source
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "CLEAN SOURCE VALIDATION"
+          echo "============================================================"
+          echo
+
+          if grep -R \
+            "HP256G8 v8.5" \
+            Feixiao/src \
+            >/dev/null 2>&1
+          then
+            echo "ERROR:"
+            echo "Generated v8.5 source code unexpectedly exists."
+            exit 1
+          fi
+
+          if grep -R \
+            "DATA PATH RECOVERY BEGIN" \
+            Feixiao/src \
+            >/dev/null 2>&1
+          then
+            echo "ERROR:"
+            echo "Old generated recovery code unexpectedly exists."
+            exit 1
+          fi
+
+          echo "No old v8.5 runtime patches: OK"
+
+
+      # ================================================================
+      # 13
+      # DOWNLOAD FIRMWARE
+      # ================================================================
+
+      - name: Download Realtek firmware
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao/firmware
+
+          FIRMWARE_FILES="
+          rtw8822b_fw.bin
+          rtw8822c_fw.bin
+          rtw8821c_fw.bin
+          rtw8821a_fw.bin
+          rtw8812a_fw.bin
+          rtw8814a_fw.bin
+          "
+
+          for FW in ${FIRMWARE_FILES}
+          do
+            if [ ! -s "${FW}" ]; then
+
+              echo
+              echo "Downloading ${FW}"
+
+              curl \
+                --location \
+                --fail \
+                --retry 3 \
+                --retry-delay 2 \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/${FW}" \
+                --output "${FW}"
+
+            fi
+
+            if [ ! -s "${FW}" ]; then
+              echo "ERROR: firmware missing:"
+              echo "${FW}"
+              exit 1
+            fi
+
+            ls -lh "${FW}"
+          done
+
+
+      # ================================================================
+      # 14
+      # BUILD ENVIRONMENT
+      # ================================================================
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "MACOS"
+          echo "============================================================"
+
+          sw_vers
+
+          echo
+          echo "============================================================"
+          echo "XCODE"
+          echo "============================================================"
+
+          xcodebuild -version
+
+          echo
+          echo "============================================================"
+          echo "CLANG"
+          echo "============================================================"
+
+          clang --version
+
+          echo
+          echo "============================================================"
+          echo "SDK"
+          echo "============================================================"
+
+          xcrun --sdk macosx --show-sdk-path
+
+          echo
+          echo "============================================================"
+          echo "MAKE"
+          echo "============================================================"
+
+          make --version
+
+
+      # ================================================================
+      # 15
+      # SHOW SOURCE CONFIGURATION
+      # ================================================================
+
+      - name: Show RTL8821CE build configuration
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "RTL8821CE"
+          echo "============================================================"
+
+          grep -n \
+            "RTL8821CE" \
+            Feixiao/src/kext/RTW88PCIDevice.cpp \
+            || true
+
+          echo
+          echo "============================================================"
+          echo "CHANNEL WIDTH"
+          echo "============================================================"
+
+          grep -n \
+            "_connChanWidth" \
+            Feixiao/src/kext/RTW88IEEE80211.cpp \
+            || true
+
+          echo
+          echo "============================================================"
+          echo "A-MPDU"
+          echo "============================================================"
+
+          grep -n \
+            "startTxAggregation" \
+            Feixiao/src/kext/RTW88IEEE80211.cpp \
+            || true
+
+
+      # ================================================================
+      # 16
+      # CLEAN BUILD
+      # ================================================================
+
+      - name: Clean previous build
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          make clean || true
+
+          rm -rf build/out || true
+
+          echo
+          echo "Clean build directory: OK"
+
+
+      # ================================================================
+      # 17
+      # BUILD
+      # ================================================================
+
+      - name: Build HP256G8 v8.5.2
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "HP 256 G8"
+          echo "RTL8821CE"
+          echo "V8.5.2 CLEAN BUILD"
+          echo "============================================================"
+          echo
+
+          make all
+
+
+      # ================================================================
+      # 18
+      # VERIFY OUTPUT EXISTS
+      # ================================================================
+
+      - name: Verify build output
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+          CLIENT="Feixiao/build/out/rtw88ctl"
+
+          if [ ! -d "${KEXT}" ]; then
+            echo "ERROR: rtw88.kext was not generated"
+            exit 1
+          fi
+
+          if [ ! -f "${CLIENT}" ]; then
+            echo "ERROR: rtw88ctl was not generated"
+            exit 1
+          fi
+
+          echo
+          echo "rtw88.kext: OK"
+          echo "rtw88ctl: OK"
+
+
+      # ================================================================
+      # 19
+      # VERIFY KEXT STRUCTURE
+      # ================================================================
+
+      - name: Validate kext structure
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+
+          test -f \
+            "${KEXT}/Contents/Info.plist"
+
+          test -f \
+            "${KEXT}/Contents/MacOS/rtw88"
+
+          echo
+          echo "============================================================"
+          echo "KEXT CONTENTS"
+          echo "============================================================"
+
+          find \
+            "${KEXT}/Contents" \
+            -maxdepth 2 \
+            -type f \
+            -print
+
+
+      # ================================================================
+      # 20
+      # VERIFY MACH-O
+      # ================================================================
+
+      - name: Validate Mach-O binaries
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT_BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+          CLIENT="Feixiao/build/out/rtw88ctl"
+
+          echo
+          echo "============================================================"
+          echo "KEXT MACH-O"
+          echo "============================================================"
+
+          file "${KEXT_BIN}"
+
+          echo
+          echo "============================================================"
+          echo "RTW88CTL"
+          echo "============================================================"
+
+          file "${CLIENT}"
+
+
+      # ================================================================
+      # 21
+      # VERIFY INFO.PLIST
+      # ================================================================
+
+      - name: Validate Info.plist
+        shell: bash
+        run: |
+          set -eu
+
+          PLIST="Feixiao/build/out/rtw88.kext/Contents/Info.plist"
+
+          plutil \
+            -lint \
+            "${PLIST}"
+
+          echo
+          echo "============================================================"
+          echo "BUNDLE ID"
+          echo "============================================================"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "${PLIST}"
+
+
+      # ================================================================
+      # 22
+      # VERIFY RTL8821CE BINARY SUPPORT
+      # ================================================================
+
+      - name: Validate RTL8821CE binary markers
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+
+          echo
+          echo "============================================================"
+          echo "RTL8821CE BINARY STRINGS"
+          echo "============================================================"
+          echo
+
+          strings "${BIN}" \
+            | grep -E \
+              "RTL8821CE|RTL8821C|8821C" \
+            || true
+
+          echo
+          echo "Binary marker scan completed."
+
+
+      # ================================================================
+      # 23
+      # VERIFY FIRMWARE INSIDE KEXT
+      # ================================================================
+
+      - name: Validate firmware resources
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+
+          echo
+          echo "============================================================"
+          echo "FIRMWARE RESOURCES"
+          echo "============================================================"
+
+          find "${KEXT}" \
+            -type f \
+            -name "*.bin" \
+            -print
+
+          COUNT="$(
+            find "${KEXT}" \
+              -type f \
+              -name "*.bin" \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          if [ "${COUNT}" -lt 1 ]; then
+            echo "ERROR: no firmware embedded in kext"
+            exit 1
+          fi
+
+          echo
+          echo "Firmware resource count: ${COUNT}"
+
+
+      # ================================================================
+      # 24
+      # COPY BUILD
+      # ================================================================
+
+      - name: Prepare artifact directory
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          rm -rf "${OUT}"
+
+          mkdir -p "${OUT}"
+
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "${OUT}/"
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "${OUT}/"
+
+          chmod +x \
+            "${OUT}/rtw88ctl"
+
+
+      # ================================================================
+      # 25
+      # BUILD INFORMATION
+      # ================================================================
+
+      - name: Create build information
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          cat > "${OUT}/BUILD-INFO.txt" <<'EOF'
+          ============================================================
+          HP 256 G8
+          REALTEK RTL8821CE
+          FEIXIAO V8.5.2 CLEAN
+          ============================================================
+
+
+          PURPOSE
+          ============================================================
+
+          Clean reproducible build.
+
+          This workflow intentionally DOES NOT rewrite the C/C++
+          driver source with awk/perl/python at build time.
+
+
+          WHY
+          ============================================================
+
+          Earlier experimental workflows repeatedly failed while
+          dynamically rewriting RTW88IEEE80211.cpp and related files.
+
+          Those workflow errors were not reliable evidence of defects
+          in the original Feixiao driver itself.
+
+
+          HARDWARE
+          ============================================================
+
+          Realtek RTL8821CE
+
+          PCI Vendor:
+          10EC
+
+          PCI Device:
+          C821
+
+
+          FEIXIAO SOURCE
+          ============================================================
+
+          e963f43188382eced4ef2fa75d19ce4db2315c68
+
+
+          RTW88-STABLE SOURCE
+          ============================================================
+
+          d029a677c49266fad86750714eb5612becd134d3
+
+
+          NATIVE FEATURES PRESENT IN THIS SOURCE
+          ============================================================
+
+          RTL8821CE support
+
+          2.4 GHz
+
+          5 GHz
+
+          HT 20 MHz
+
+          HT 40 MHz
+
+          VHT 80 MHz
+
+          WPA2
+
+          PTK / GTK installation
+
+          TX A-MPDU
+
+          RX A-MPDU reorder
+
+          PCI bus mastering
+
+          DMA bounce-buffer implementation
+
+
+          IMPORTANT
+          ============================================================
+
+          This build is intended to establish a clean baseline.
+
+          It does not claim that the experimental RTL8821CE driver
+          will deliver a specific throughput.
+
+          100+ Mbps must be verified on the actual notebook/router.
+
+          Always use rtw88.kext and rtw88ctl from the SAME build.
+
+          Keep the currently known-working Kext as backup.
+          EOF
+
+
+      # ================================================================
+      # 26
+      # SHA256
+      # ================================================================
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          cd "${OUT}"
+
+          shasum \
+            -a 256 \
+            rtw88ctl \
+            > SHA256SUMS.txt
+
+          find \
+            rtw88.kext \
+            -type f \
+            -exec shasum -a 256 {} \; \
+            >> SHA256SUMS.txt
+
+          cat SHA256SUMS.txt
+
+
+      # ================================================================
+      # 27
+      # PACKAGE
+      # ================================================================
+
+      - name: Package HP256G8 v8.5.2
+        shell: bash
+        run: |
+          set -eu
+
+          cd "${RUNNER_TEMP}"
+
+          rm -f \
+            Feixiao_HP256G8_v8_5_2_Clean.zip
+
+          zip \
+            -r \
+            Feixiao_HP256G8_v8_5_2_Clean.zip \
+            "${BUILD_NAME}"
+
+          ls -lh \
+            Feixiao_HP256G8_v8_5_2_Clean.zip
+
+
+      # ================================================================
+      # 28
+      # UPLOAD
+      # ================================================================
+
+      - name: Upload HP256G8 v8.5.2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-HP256G8-v8.5.2-Clean
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_5_2_Clean.zip
+          if-no-files-found: error
+          retention-days: 7
