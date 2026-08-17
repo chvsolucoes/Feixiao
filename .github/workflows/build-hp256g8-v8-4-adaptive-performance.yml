@@ -65,6 +65,7 @@ jobs:
 
           from pathlib import Path
           import sys
+          import re
 
 
           # ======================================================================
@@ -2468,6 +2469,21 @@ jobs:
               )
 
 
+          # ==============================================================
+          # V8.4 FIX:
+          #
+          # A validação antiga procurava literalmente:
+          #
+          #     delta <= 32
+          #
+          # porém o C gerado está formatado:
+          #
+          #     delta <=
+          #     32
+          #
+          # Agora a validação usa regex e aceita whitespace/newlines.
+          # ==============================================================
+
           required_dma_markers = (
 
               "static bool rtw_pci_dma_check(",
@@ -2475,8 +2491,6 @@ jobs:
               "HP256G8 v8.4 SAFE RESYNC",
 
               "drop current descriptor",
-
-              "delta <= 32",
 
               "observed",
 
@@ -2501,6 +2515,27 @@ jobs:
 
                   "final DMA marker"
               )
+
+
+          bounded_resync_pattern = re.compile(
+              r"delta\s*>\s*0"
+              r"\s*&&\s*"
+              r"delta\s*<=\s*32",
+              re.MULTILINE
+          )
+
+
+          if not bounded_resync_pattern.search(lp):
+
+              raise SystemExit(
+                  "ERROR: bounded DMA resync condition "
+                  "'delta > 0 && delta <= 32' missing"
+              )
+
+
+          print_ok(
+              "Bounded DMA resync delta 1..32"
+          )
 
 
           if (
