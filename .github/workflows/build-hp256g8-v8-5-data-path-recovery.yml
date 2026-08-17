@@ -28,7 +28,7 @@ jobs:
 
 
       # ================================================================
-      # 2. RTW88-STABLE
+      # 2. CLONE RTW88-STABLE
       # ================================================================
 
       - name: Clone matching rtw88-stable
@@ -59,7 +59,7 @@ jobs:
 
 
       # ================================================================
-      # 3. CHECAR ARQUIVOS
+      # 3. VALIDAR SOURCE TREE
       # ================================================================
 
       - name: Validate source tree
@@ -67,19 +67,27 @@ jobs:
         run: |
           set -euxo pipefail
 
-          test -f Feixiao/src/kext/RTW88IEEE80211.cpp
-          test -f Feixiao/src/kext/RTW88IEEE80211.hpp
-          test -f Feixiao/src/kext/RTW88PCIDevice.cpp
-          test -f Feixiao/src/compat/rtw88_compat.c
+          test -f \
+            Feixiao/src/kext/RTW88IEEE80211.cpp
+
+          test -f \
+            Feixiao/src/kext/RTW88IEEE80211.hpp
+
+          test -f \
+            Feixiao/src/kext/RTW88PCIDevice.cpp
+
+          test -f \
+            Feixiao/src/compat/rtw88_compat.c
 
           test -f \
             rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
 
+          echo
           echo "Source tree: OK"
 
 
       # ================================================================
-      # 4. RATE CONTROL
+      # 4. AUTOMATIC RATE CONTROL
       # ================================================================
 
       - name: Enable automatic firmware rate control
@@ -89,16 +97,22 @@ jobs:
 
           FILE="Feixiao/src/compat/rtw88_compat.c"
 
-          perl -0pi -e '
-            s/rtwdev->dm_info\.fix_rate\s*=\s*DESC_RATE6M\s*;/
-              rtwdev->dm_info.fix_rate = 0xFF;
-            /gx
-          ' "$FILE"
+          if grep -q \
+            "rtwdev->dm_info.fix_rate = DESC_RATE6M;" \
+            "$FILE"
+          then
+
+            sed -i '' \
+              's/rtwdev->dm_info.fix_rate = DESC_RATE6M;/rtwdev->dm_info.fix_rate = 0xFF;/' \
+              "$FILE"
+
+          fi
 
           grep -n \
             "fix_rate = 0xFF" \
             "$FILE"
 
+          echo
           echo "Automatic rate control: OK"
 
 
@@ -113,30 +127,79 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          perl -0pi -e '
-            s{
-              \s*key\[3\]\s*=\s*0\s*;
-              \s*key\[4\]\s*=\s*16\s*;
-              \s*/\*\s*key\s+length\s*=\s*16\s*\(AES-128\)\s*\*/
-            }{
-              if (step == 4) {
-                  key[3] = 0;
-                  key[4] = 0;
+          if grep -q \
+            "HP256G8 v8.5 M4 key_length=0" \
+            "$FILE"
+          then
+            echo "M4 Key Length fix already present."
+            exit 0
+          fi
 
-                  IOLog(
-                      "rtw88: HP256G8 v8.5 M4 key_length=0\\n"
-                  );
-              } else {
-                  key[3] = 0;
-                  key[4] = 16;
-              }
-            }gxs
-          ' "$FILE"
+          LINE="$(
+            grep -n \
+              "key\[3\] = 0; key\[4\] = 16;" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          cp \
+            "$FILE" \
+            /tmp/RTW88IEEE80211.before-keylength.cpp
+
+          awk -v target="$LINE" '
+          NR == target {
+              print "    if (step == 4) {"
+              print ""
+              print "        key[3] = 0;"
+              print "        key[4] = 0;"
+              print ""
+              print "        IOLog("
+              print "            \"rtw88: HP256G8 v8.5 M4 key_length=0\\n\""
+              print "        );"
+              print ""
+              print "    } else {"
+              print ""
+              print "        key[3] = 0;"
+              print "        key[4] = 16;"
+              print "    }"
+              next
+          }
+
+          {
+              print
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.keylength.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.keylength.cpp \
+            "$FILE"
+
+          COUNT="$(
+            grep -c \
+              "HP256G8 v8.5 M4 key_length=0" \
+              "$FILE"
+          )"
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: M4 Key Length patch invalid"
+
+            cp \
+              /tmp/RTW88IEEE80211.before-keylength.cpp \
+              "$FILE"
+
+            exit 1
+          fi
 
           grep -n \
+            -A 15 \
+            -B 4 \
             "HP256G8 v8.5 M4 key_length=0" \
             "$FILE"
 
+          echo
           echo "WPA2 M4 Key Length: OK"
 
 
@@ -151,44 +214,77 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          perl -0pi -e '
-            s{
-              memcpy\s*\(
-                \s*key\s*\+\s*13\s*,
-                \s*_snonce\s*,
-                \s*32\s*
-              \)\s*;
-              \s*/\*\s*key\[13\.\.44\]\s*=\s*SNonce\s*\*/
-            }{
-              if (step == 4) {
-                  memset(
-                      key + 13,
-                      0,
-                      32
-                  );
+          if grep -q \
+            "HP256G8 v8.5 M4 nonce zeroed" \
+            "$FILE"
+          then
+            echo "M4 nonce fix already present."
+            exit 0
+          fi
 
-                  IOLog(
-                      "rtw88: HP256G8 v8.5 M4 nonce zeroed\\n"
-                  );
-              } else {
-                  memcpy(
-                      key + 13,
-                      _snonce,
-                      32
-                  );
-              }
-            }gxs
-          ' "$FILE"
+          LINE="$(
+            grep -n \
+              "memcpy(key + 13, _snonce, 32);" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          cp \
+            "$FILE" \
+            /tmp/RTW88IEEE80211.before-nonce.cpp
+
+          awk -v target="$LINE" '
+          NR == target {
+              print "    if (step == 4) {"
+              print ""
+              print "        memset("
+              print "            key + 13,"
+              print "            0,"
+              print "            32"
+              print "        );"
+              print ""
+              print "        IOLog("
+              print "            \"rtw88: HP256G8 v8.5 M4 nonce zeroed\\n\""
+              print "        );"
+              print ""
+              print "    } else {"
+              print ""
+              print "        memcpy("
+              print "            key + 13,"
+              print "            _snonce,"
+              print "            32"
+              print "        );"
+              print "    }"
+              next
+          }
+
+          {
+              print
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.nonce.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.nonce.cpp \
+            "$FILE"
 
           grep -n \
+            -A 18 \
+            -B 4 \
             "HP256G8 v8.5 M4 nonce zeroed" \
             "$FILE"
 
+          echo
           echo "WPA2 M4 nonce: OK"
 
 
       # ================================================================
-      # 7. M3 DIAGNOSTIC
+      # 7. WPA2 M3 DIAGNOSTICS
+      #
+      # CORREÇÃO:
+      # NÃO USA PERL.
       # ================================================================
 
       - name: Add WPA2 M3 diagnostics
@@ -198,61 +294,127 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          if ! grep -q \
+          if grep -q \
             "HP256G8 v8.5 received M3" \
             "$FILE"
           then
 
-            perl -0pi -e '
-              s{
-                \}\s*else\s+if\s*\(\s*is_m3\s*\)\s*\{
-              }{
-                } else if (is_m3) {
-
-                    IOLog(
-                        "rtw88: HP256G8 v8.5 received M3\\n"
-                    );
-              }x
-            ' "$FILE"
+            echo "M3 diagnostic already present."
+            exit 0
 
           fi
 
+          cp \
+            "$FILE" \
+            /tmp/RTW88IEEE80211.before-m3.cpp
+
+          awk '
+          {
+              print $0
+
+              if (
+                  $0 ~ /else if[[:space:]]*\([[:space:]]*is_m3[[:space:]]*\)[[:space:]]*\{/
+                  &&
+                  inserted == 0
+              ) {
+
+                  print ""
+                  print "        IOLog("
+                  print "            \"rtw88: HP256G8 v8.5 received M3\\n\""
+                  print "        );"
+                  print ""
+
+                  inserted = 1
+              }
+          }
+
+          END {
+              if (inserted != 1) {
+                  exit 42
+              }
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.after-m3.cpp || {
+
+              STATUS=$?
+
+              if [ "$STATUS" -eq 42 ]; then
+                  echo "ERROR: M3 anchor not found"
+              else
+                  echo "ERROR: awk failed with status $STATUS"
+              fi
+
+              exit 1
+          }
+
+          mv \
+            /tmp/RTW88IEEE80211.after-m3.cpp \
+            "$FILE"
+
+          COUNT="$(
+            grep -c \
+              "HP256G8 v8.5 received M3" \
+              "$FILE"
+          )"
+
+          if [ "$COUNT" -ne 1 ]; then
+
+            echo "ERROR: expected exactly one M3 diagnostic, found $COUNT"
+
+            cp \
+              /tmp/RTW88IEEE80211.before-m3.cpp \
+              "$FILE"
+
+            exit 1
+          fi
+
+          echo
+          echo "================================================"
+          echo "WPA2 M3 DIAGNOSTIC"
+          echo "================================================"
+
           grep -n \
+            -A 8 \
+            -B 3 \
             "HP256G8 v8.5 received M3" \
             "$FILE"
 
+          echo
+          echo "WPA2 M3 diagnostic: OK"
+
 
       # ================================================================
-      # 8. WPA2 M4/PTK/GTK
+      # 8. VALIDAR ROTINAS WPA2
       # ================================================================
 
-      - name: Preserve WPA2 M4 before PTK ordering
+      - name: Validate WPA2 PTK GTK routines
         shell: bash
         run: |
           set -euxo pipefail
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          grep -n \
+          grep -q \
             "sendEAPOLKey" \
             "$FILE"
 
-          grep -n \
+          grep -q \
+            "_ptkConf" \
+            "$FILE"
+
+          grep -q \
+            "_gtkConf" \
+            "$FILE"
+
+          grep -q \
             "installKey" \
             "$FILE"
 
           echo
-          echo "WPA2 source anchors found."
-
-          # A v8.5 mantém a correção de M4/PTK das versões anteriores.
-          # A validação abaixo impede gerar uma build sem as rotinas.
-          grep -q "sendEAPOLKey" "$FILE"
-          grep -q "_ptkConf" "$FILE"
-          grep -q "_gtkConf" "$FILE"
+          echo "WPA2/PTK/GTK source routines: OK"
 
 
       # ================================================================
-      # 9. A-MPDU SETTLE
+      # 9. A-MPDU WPA2 SETTLE
       # ================================================================
 
       - name: Add WPA2 A-MPDU settle delay
@@ -262,38 +424,52 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          if ! grep -q \
+          if grep -q \
             "HP256G8 v8.5 WPA2 settle complete" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                startTxAggregation\s*\(\s*\)\s*;
-                \s*/\*
-                  \s*keys\s+are\s+installed
-                  .*?
-                \*/
-              }{
-                IOSleep(100);
-
-                IOLog(
-                    "rtw88: HP256G8 v8.5 WPA2 settle complete, starting A-MPDU\\n"
-                );
-
-                startTxAggregation();
-              }gxs
-            ' "$FILE"
-
+            echo "A-MPDU settle already present."
+            exit 0
           fi
 
+          LINE="$(
+            grep -n \
+              "startTxAggregation();" \
+              "$FILE" \
+              | tail -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          awk -v target="$LINE" '
+          NR == target {
+              print "        IOSleep(100);"
+              print ""
+              print "        IOLog("
+              print "            \"rtw88: HP256G8 v8.5 WPA2 settle complete, starting A-MPDU\\n\""
+              print "        );"
+              print ""
+          }
+
+          {
+              print
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.ampdu.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.ampdu.cpp \
+            "$FILE"
+
           grep -n \
+            -A 10 \
+            -B 4 \
             "HP256G8 v8.5 WPA2 settle complete" \
             "$FILE"
 
 
       # ================================================================
-      # 10. HEADER - ADAPTIVE/DATA PATH STATE
+      # 10. HEADER VARIABLES
       # ================================================================
 
       - name: Add v8.5 state variables
@@ -303,43 +479,56 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.hpp"
 
-          if ! grep -q \
+          if grep -q \
             "_usefulRxCount" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                (
-                  uint8_t\s+_connChanWidth\s*=\s*20\s*;
-                  [^\n]*
-                )
-              }{
-                $1
-
-                    bool _force40MHz = false;
-
-                    volatile bool _fallbackPending = false;
-
-                    uint32_t _perfLastRxFrameCount = 0;
-
-                    uint32_t _perfTxWithoutRx = 0;
-
-                    volatile uint32_t _usefulRxCount = 0;
-
-                    uint32_t _dataPathRecoveryCount = 0;
-              }x
-            ' "$FILE"
-
+            echo "v8.5 state variables already present."
+            exit 0
           fi
 
+          LINE="$(
+            grep -n \
+              "_connChanWidth" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          awk -v target="$LINE" '
+          {
+              print
+
+              if (NR == target) {
+
+                  print "    bool _force40MHz = false;"
+                  print ""
+                  print "    volatile bool _fallbackPending = false;"
+                  print ""
+                  print "    uint32_t _perfLastRxFrameCount = 0;"
+                  print ""
+                  print "    uint32_t _perfTxWithoutRx = 0;"
+                  print ""
+                  print "    volatile uint32_t _usefulRxCount = 0;"
+                  print ""
+                  print "    uint32_t _dataPathRecoveryCount = 0;"
+              }
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.hpp.new
+
+          mv \
+            /tmp/RTW88IEEE80211.hpp.new \
+            "$FILE"
+
           grep -nE \
-            "connChanWidth|force40MHz|fallbackPending|usefulRx|dataPathRecovery" \
+            "connChanWidth|force40MHz|fallbackPending|perfLastRx|perfTx|usefulRx|dataPathRecovery" \
             "$FILE"
 
 
       # ================================================================
-      # 11. HEADER - RECOVERY METHODS
+      # 11. HEADER RECOVERY METHODS
       # ================================================================
 
       - name: Add v8.5 recovery declarations
@@ -349,34 +538,45 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.hpp"
 
-          if ! grep -q \
+          if grep -q \
             "scheduleDataPathRecovery" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                (
-                  void\s+setConnectedChandef\s*
-                  \(
-                    struct\s+ieee80211_channel\s*\*chan
-                  \)\s*;
-                )
-              }{
-                $1
-
-                    void scheduleDataPathRecovery();
-
-                    void runDataPathRecovery();
-
-                    static void dataPathRecoveryTCFn(
-                        thread_call_param_t self,
-                        thread_call_param_t
-                    );
-              }x
-            ' "$FILE"
-
+            echo "Recovery declarations already present."
+            exit 0
           fi
+
+          LINE="$(
+            grep -n \
+              "setConnectedChandef" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          awk -v target="$LINE" '
+          {
+              print
+
+              if (NR == target) {
+
+                  print "    void scheduleDataPathRecovery();"
+                  print ""
+                  print "    void runDataPathRecovery();"
+                  print ""
+                  print "    static void dataPathRecoveryTCFn("
+                  print "        thread_call_param_t self,"
+                  print "        thread_call_param_t"
+                  print "    );"
+              }
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.methods.hpp
+
+          mv \
+            /tmp/RTW88IEEE80211.methods.hpp \
+            "$FILE"
 
           grep -nE \
             "scheduleDataPathRecovery|runDataPathRecovery|dataPathRecoveryTCFn" \
@@ -384,34 +584,46 @@ jobs:
 
 
       # ================================================================
-      # 12. HEADER - THREAD CALL
+      # 12. HEADER RECOVERY THREAD
       # ================================================================
 
-      - name: Add data path recovery thread call
+      - name: Add Data Path Recovery thread call member
         shell: bash
         run: |
           set -euxo pipefail
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.hpp"
 
-          if ! grep -q \
+          if grep -q \
             "_dataPathRecoveryTC" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                (
-                  thread_call_t\s+_connectTC\s*=\s*nullptr\s*;
-                )
-              }{
-                $1
-
-                    thread_call_t _dataPathRecoveryTC = nullptr;
-              }x
-            ' "$FILE"
-
+            exit 0
           fi
+
+          LINE="$(
+            grep -n \
+              "_connectTC" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          awk -v target="$LINE" '
+          {
+              print
+
+              if (NR == target) {
+                  print "    thread_call_t _dataPathRecoveryTC = nullptr;"
+              }
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.thread.hpp
+
+          mv \
+            /tmp/RTW88IEEE80211.thread.hpp \
+            "$FILE"
 
           grep -n \
             "_dataPathRecoveryTC" \
@@ -429,24 +641,29 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
+          if grep -q \
+            "_force40MHz &&" \
+            "$FILE"
+          then
+            echo "Adaptive VHT condition already present."
+            exit 0
+          fi
+
           perl -0pi -e '
-            s{
-              if\s*\(
-                \s*chip80
-                \s*&&
-                \s*vhtWidth\s*==\s*1
-                \s*&&
-                \s*vhtSeg0\s*!=\s*0
-                \s*
+            s!
+              if\s*\(\s*
+              chip80\s*&&\s*
+              vhtWidth\s*==\s*1\s*&&\s*
+              vhtSeg0\s*!=\s*0\s*
               \)
-            }{
+            !
               if (
                   !_force40MHz &&
                   chip80 &&
                   vhtWidth == 1 &&
                   vhtSeg0 != 0
               )
-            }gx
+            !gx
           ' "$FILE"
 
           grep -n \
@@ -456,7 +673,7 @@ jobs:
 
 
       # ================================================================
-      # 14. BUILD ID
+      # 14. RUNTIME IDENTIFICATION
       # ================================================================
 
       - name: Add v8.5 runtime identification
@@ -466,30 +683,42 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          if ! grep -q \
+          if grep -q \
             "HP256G8 v8.5 Data-Path Recovery active" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                (
-                  IOLog\s*\(
-                    "rtw88:\s*connected\s+chandef:
-                )
-              }{
-                IOLog(
-                    "rtw88: HP256G8 v8.5 Data-Path Recovery active "
-                    "safe40=%u usefulRx=%u\\n",
-                    _force40MHz ? 1 : 0,
-                    _usefulRxCount
-                );
-
-                $1
-              }x
-            ' "$FILE"
-
+            exit 0
           fi
+
+          LINE="$(
+            grep -n \
+              "connected chandef:" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          awk -v target="$LINE" '
+          NR == target {
+              print "    IOLog("
+              print "        \"rtw88: HP256G8 v8.5 Data-Path Recovery active \""
+              print "        \"safe40=%u usefulRx=%u\\n\","
+              print "        _force40MHz ? 1 : 0,"
+              print "        _usefulRxCount"
+              print "    );"
+              print ""
+          }
+
+          {
+              print
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.identity.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.identity.cpp \
+            "$FILE"
 
           grep -n \
             "HP256G8 v8.5 Data-Path Recovery active" \
@@ -500,51 +729,70 @@ jobs:
       # 15. USEFUL ETHERNET RX COUNTER
       # ================================================================
 
-      - name: Count useful IPv4 ARP IPv6 RX
+      - name: Count useful Ethernet RX
         shell: bash
         run: |
           set -euxo pipefail
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          if ! grep -q \
+          if grep -q \
             "HP256G8 v8.5 useful Ethernet RX" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                (
-                  void\s+RTW88IEEE80211::deliverEthernet
-                  \s*\(
-                    const\s+uint8_t\s*\*da\s*,
-                    \s*const\s+uint8_t\s*\*sa\s*,
-                    .*?
-                  \)
-                  \s*\{
-                )
-              }{
-                $1
-
-                    /*
-                     * HP256G8 v8.5 useful Ethernet RX
-                     *
-                     * Count only actual network data delivered by the
-                     * 802.11 -> Ethernet path.
-                     */
-
-                    if (
-                        ethertype == 0x0800 ||
-                        ethertype == 0x0806 ||
-                        ethertype == 0x86DD
-                    ) {
-                        _usefulRxCount++;
-                    }
-
-              }xs
-            ' "$FILE"
-
+            exit 0
           fi
+
+          LINE="$(
+            grep -n \
+              "RTW88IEEE80211::deliverEthernet" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          BRACE="$(
+            tail -n +"$LINE" "$FILE" \
+              | grep -n "^{" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$BRACE"
+
+          INSERT="$((LINE + BRACE - 1))"
+
+          awk -v target="$INSERT" '
+          {
+              print
+
+              if (NR == target) {
+
+                  print ""
+                  print "    /*"
+                  print "     * HP256G8 v8.5 useful Ethernet RX"
+                  print "     *"
+                  print "     * Only actual IPv4 / ARP / IPv6 traffic"
+                  print "     * delivered through the Ethernet path."
+                  print "     */"
+                  print ""
+                  print "    if ("
+                  print "        ethertype == 0x0800 ||"
+                  print "        ethertype == 0x0806 ||"
+                  print "        ethertype == 0x86DD"
+                  print "    ) {"
+                  print "        _usefulRxCount++;"
+                  print "    }"
+                  print ""
+              }
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.usefulrx.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.usefulrx.cpp \
+            "$FILE"
 
           grep -n \
             -A 25 \
@@ -554,7 +802,7 @@ jobs:
 
 
       # ================================================================
-      # 16. DATA-PATH RECOVERY FUNCTIONS
+      # 16. DATA PATH RECOVERY FUNCTIONS
       # ================================================================
 
       - name: Add Data Path Recovery worker
@@ -568,7 +816,6 @@ jobs:
             "void RTW88IEEE80211::runDataPathRecovery()" \
             "$FILE"
           then
-            echo "Data Path Recovery already present."
             exit 0
           fi
 
@@ -614,10 +861,13 @@ jobs:
               );
 
               if (_dataPathRecoveryTC) {
+
                   thread_call_enter(
                       _dataPathRecoveryTC
                   );
+
               } else {
+
                   _fallbackPending =
                       false;
               }
@@ -632,6 +882,7 @@ jobs:
                   !_hw ||
                   !_vif
               ) {
+
                   _fallbackPending =
                       false;
 
@@ -657,15 +908,11 @@ jobs:
               );
 
 
-              /*
-               * An 80 MHz failure permanently selects 40 MHz until
-               * the driver is restarted.
-               */
-
               if (
                   failedWidth ==
                   80
               ) {
+
                   _force40MHz =
                       true;
 
@@ -677,14 +924,21 @@ jobs:
 
 
               /*
-               * Clean association teardown.
+               * Clean disconnect:
                *
-               * Existing Feixiao disconnect/releaseSta path also tears
-               * down RX BA/reorder sessions and clears keys.
+               * association
+               * PTK/GTK
+               * station
+               * TX BA
+               * RX BA/reorder
                */
 
               doDisconnect();
 
+
+              /*
+               * Give firmware / PCI / DMA / BA state time to settle.
+               */
 
               IOSleep(
                   250
@@ -696,6 +950,7 @@ jobs:
                   !_hw ||
                   !_vif
               ) {
+
                   _fallbackPending =
                       false;
 
@@ -727,18 +982,19 @@ jobs:
 
 
               if (_connectTC) {
+
                   thread_call_enter(
                       _connectTC
                   );
+
               } else {
+
                   doAuthenticate();
               }
           }
 
 
           CPP
-
-          # Insere imediatamente antes do início da seção TX.
 
           LINE="$(
             grep -n \
@@ -752,21 +1008,31 @@ jobs:
 
           INSERT="$((LINE - 1))"
 
-          head -n "$INSERT" "$FILE" > /tmp/ieee.new
+          head -n "$INSERT" \
+            "$FILE" \
+            > /tmp/RTW88IEEE80211.recovery.cpp
 
-          cat /tmp/v85_recovery.cpp >> /tmp/ieee.new
+          cat \
+            /tmp/v85_recovery.cpp \
+            >> /tmp/RTW88IEEE80211.recovery.cpp
 
-          tail -n +"$LINE" "$FILE" >> /tmp/ieee.new
+          tail -n +"$LINE" \
+            "$FILE" \
+            >> /tmp/RTW88IEEE80211.recovery.cpp
 
-          mv /tmp/ieee.new "$FILE"
+          mv \
+            /tmp/RTW88IEEE80211.recovery.cpp \
+            "$FILE"
 
           grep -n \
+            -A 100 \
+            -B 5 \
             "DATA PATH RECOVERY BEGIN" \
             "$FILE"
 
 
       # ================================================================
-      # 17. ALLOCATE WORKER
+      # 17. ALLOCATE RECOVERY THREAD
       # ================================================================
 
       - name: Allocate Data Path Recovery worker
@@ -777,50 +1043,77 @@ jobs:
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
           if grep -q \
-            "thread_call_allocate.*dataPathRecoveryTCFn" \
-            "$FILE"
+            "RTW88IEEE80211::dataPathRecoveryTCFn" \
+            "$FILE" \
+            &&
+            grep -q \
+              "_dataPathRecoveryTC =" \
+              "$FILE"
           then
-            echo "Recovery thread allocation already present."
+            echo "Recovery worker allocation already present."
             exit 0
           fi
 
-          perl -0pi -e '
-            s{
-              (
-                _connectTC\s*=\s*thread_call_allocate
-                \s*\(
-                  .*?
-                \)\s*;
-              )
-            }{
-              $1
+          LINE="$(
+            grep -n \
+              "_connectTC = thread_call_allocate" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
 
-                  _dataPathRecoveryTC =
-                      thread_call_allocate(
-                          (thread_call_func_t)
-                          RTW88IEEE80211::dataPathRecoveryTCFn,
-                          (thread_call_param_t)this
-                      );
+          test -n "$LINE"
 
-                  if (!_dataPathRecoveryTC) {
-                      IOLog(
-                          "rtw88: HP256G8 v8.5 failed to allocate "
-                          "Data Path Recovery worker\\n"
-                      );
+          # Find end of connectTC allocation statement.
+          END="$(
+            tail -n +"$LINE" "$FILE" \
+              | grep -n ");" \
+              | head -1 \
+              | cut -d: -f1
+          )"
 
-                      return false;
-                  }
-            }xs
-          ' "$FILE"
+          test -n "$END"
+
+          INSERT="$((LINE + END - 1))"
+
+          awk -v target="$INSERT" '
+          {
+              print
+
+              if (NR == target) {
+
+                  print ""
+                  print "    _dataPathRecoveryTC ="
+                  print "        thread_call_allocate("
+                  print "            (thread_call_func_t)"
+                  print "            RTW88IEEE80211::dataPathRecoveryTCFn,"
+                  print "            (thread_call_param_t)this"
+                  print "        );"
+                  print ""
+                  print "    if (!_dataPathRecoveryTC) {"
+                  print ""
+                  print "        IOLog("
+                  print "            \"rtw88: HP256G8 v8.5 failed to allocate Data Path Recovery worker\\n\""
+                  print "        );"
+                  print ""
+                  print "        return false;"
+                  print "    }"
+              }
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.alloc.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.alloc.cpp \
+            "$FILE"
 
           grep -n \
-            -A 12 \
+            -A 18 \
             "_dataPathRecoveryTC =" \
             "$FILE"
 
 
       # ================================================================
-      # 18. FREE WORKER
+      # 18. FREE RECOVERY THREAD
       # ================================================================
 
       - name: Free Data Path Recovery worker
@@ -837,29 +1130,48 @@ jobs:
             exit 0
           fi
 
-          perl -0pi -e '
-            s{
-              (
-                if\s*\(\s*_connectTC\s*\)
-                \s*\{
-              )
-            }{
-                if (_dataPathRecoveryTC) {
-                    thread_call_cancel(
-                        _dataPathRecoveryTC
-                    );
+          LINE="$(
+            grep -n \
+              "if (_connectTC)" \
+              "$FILE" \
+              | tail -1 \
+              | cut -d: -f1
+          )"
 
-                    thread_call_free(
-                        _dataPathRecoveryTC
-                    );
+          test -n "$LINE"
 
-                    _dataPathRecoveryTC =
-                        nullptr;
-                }
+          BEFORE="$((LINE - 1))"
 
-                $1
-            }x
-          ' "$FILE"
+          head -n "$BEFORE" \
+            "$FILE" \
+            > /tmp/RTW88IEEE80211.free.cpp
+
+          cat >> /tmp/RTW88IEEE80211.free.cpp <<'CPP'
+
+              if (_dataPathRecoveryTC) {
+
+                  thread_call_cancel(
+                      _dataPathRecoveryTC
+                  );
+
+                  thread_call_free(
+                      _dataPathRecoveryTC
+                  );
+
+                  _dataPathRecoveryTC =
+                      nullptr;
+              }
+
+
+          CPP
+
+          tail -n +"$LINE" \
+            "$FILE" \
+            >> /tmp/RTW88IEEE80211.free.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.free.cpp \
+            "$FILE"
 
           grep -n \
             -A 15 \
@@ -868,7 +1180,7 @@ jobs:
 
 
       # ================================================================
-      # 19. DATA-PATH WATCHDOG
+      # 19. DATA PATH WATCHDOG
       # ================================================================
 
       - name: Install useful RX Data Path watchdog
@@ -885,92 +1197,106 @@ jobs:
             exit 0
           fi
 
-          perl -0pi -e '
-            s{
-              (
-                UInt32\s+
-                RTW88IEEE80211::outputPacket
-                \s*\(\s*mbuf_t\s+m\s*\)
-                \s*\{
-              )
-            }{
-              $1
+          LINE="$(
+            grep -n \
+              "UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
 
-                  /*
-                   * HP256G8 v8.5 DATA PATH WATCHDOG
-                   *
-                   * Raw Wi-Fi RX is NOT used here.
-                   *
-                   * Only IPv4 / ARP / IPv6 packets that reached
-                   * deliverEthernet() count as proof of a live path.
-                   */
+          test -n "$LINE"
 
-                  if (
-                      _state == RTW88_STATE_CONNECTED &&
-                      !_fallbackPending
-                  ) {
+          BRACE="$(
+            tail -n +"$LINE" "$FILE" \
+              | grep -n "^{" \
+              | head -1 \
+              | cut -d: -f1
+          )"
 
-                      uint32_t currentUsefulRx =
-                          _usefulRxCount;
+          test -n "$BRACE"
 
+          INSERT="$((LINE + BRACE - 1))"
 
-                      if (
-                          currentUsefulRx !=
-                          _perfLastRxFrameCount
-                      ) {
+          awk -v target="$INSERT" '
+          {
+              print
 
-                          _perfLastRxFrameCount =
-                              currentUsefulRx;
+              if (NR == target) {
 
-                          _perfTxWithoutRx =
-                              0;
+                  print ""
+                  print "    /*"
+                  print "     * ================================================================"
+                  print "     * HP256G8 v8.5 DATA PATH WATCHDOG"
+                  print "     * ================================================================"
+                  print "     *"
+                  print "     * Raw 802.11 RX is not enough to prove IP/ARP is alive."
+                  print "     * We monitor useful Ethernet RX instead."
+                  print "     */"
+                  print ""
+                  print "    if ("
+                  print "        _state == RTW88_STATE_CONNECTED &&"
+                  print "        !_fallbackPending"
+                  print "    ) {"
+                  print ""
+                  print "        uint32_t currentUsefulRx ="
+                  print "            _usefulRxCount;"
+                  print ""
+                  print "        if ("
+                  print "            currentUsefulRx !="
+                  print "            _perfLastRxFrameCount"
+                  print "        ) {"
+                  print ""
+                  print "            _perfLastRxFrameCount ="
+                  print "                currentUsefulRx;"
+                  print ""
+                  print "            _perfTxWithoutRx ="
+                  print "                0;"
+                  print ""
+                  print "        } else {"
+                  print ""
+                  print "            if ("
+                  print "                _perfTxWithoutRx <"
+                  print "                0xfffffff0U"
+                  print "            ) {"
+                  print ""
+                  print "                _perfTxWithoutRx++;"
+                  print "            }"
+                  print "        }"
+                  print ""
+                  print "        bool invalidRssi ="
+                  print "            (_rssi >= 0);"
+                  print ""
+                  print "        bool usefulRxStalled ="
+                  print "            (_perfTxWithoutRx >= 128);"
+                  print ""
+                  print "        if ("
+                  print "            invalidRssi ||"
+                  print "            usefulRxStalled"
+                  print "        ) {"
+                  print ""
+                  print "            IOLog("
+                  print "                \"rtw88: HP256G8 v8.5 DATA PATH STALL \""
+                  print "                \"width=%u rssi=%d \""
+                  print "                \"txNoUsefulRx=%u usefulRx=%u rawRx=%u\\n\","
+                  print "                _connChanWidth,"
+                  print "                _rssi,"
+                  print "                _perfTxWithoutRx,"
+                  print "                _usefulRxCount,"
+                  print "                _rxFrameCount"
+                  print "            );"
+                  print ""
+                  print "            scheduleDataPathRecovery();"
+                  print "        }"
+                  print "    }"
+                  print ""
+              }
+          }
+          ' "$FILE" > /tmp/RTW88IEEE80211.watchdog.cpp
 
-                      } else {
-
-                          if (
-                              _perfTxWithoutRx <
-                              0xfffffff0U
-                          ) {
-                              _perfTxWithoutRx++;
-                          }
-                      }
-
-
-                      bool invalidRssi =
-                          (
-                              _rssi >= 0
-                          );
-
-
-                      bool usefulRxStalled =
-                          (
-                              _perfTxWithoutRx >= 128
-                          );
-
-
-                      if (
-                          invalidRssi ||
-                          usefulRxStalled
-                      ) {
-
-                          IOLog(
-                              "rtw88: HP256G8 v8.5 DATA PATH STALL "
-                              "width=%u rssi=%d "
-                              "txNoUsefulRx=%u usefulRx=%u rawRx=%u\\n",
-                              _connChanWidth,
-                              _rssi,
-                              _perfTxWithoutRx,
-                              _usefulRxCount,
-                              _rxFrameCount
-                          );
-
-
-                          scheduleDataPathRecovery();
-                      }
-                  }
-
-            }xs
-          ' "$FILE"
+          mv \
+            /tmp/RTW88IEEE80211.watchdog.cpp \
+            "$FILE"
 
           grep -n \
             -A 100 \
@@ -979,7 +1305,7 @@ jobs:
 
 
       # ================================================================
-      # 20. DRIVER START RESET
+      # 20. RESET COUNTERS AT DRIVER START
       # ================================================================
 
       - name: Reset Data Path counters on driver start
@@ -996,42 +1322,65 @@ jobs:
             exit 0
           fi
 
-          perl -0pi -e '
-            s{
-              (
-                _state\s*=\s*RTW88_STATE_IDLE\s*;
-                \s*
-                _scanReturnState\s*=\s*RTW88_STATE_IDLE\s*;
-              )
-            }{
-                _force40MHz = false;
+          LINE="$(
+            grep -n \
+              "_state = RTW88_STATE_IDLE;" \
+              "$FILE" \
+              | tail -1 \
+              | cut -d: -f1
+          )"
 
-                _fallbackPending = false;
+          test -n "$LINE"
 
-                _usefulRxCount = 0;
+          BEFORE="$((LINE - 1))"
 
-                _perfLastRxFrameCount = 0;
+          head -n "$BEFORE" \
+            "$FILE" \
+            > /tmp/RTW88IEEE80211.reset.cpp
 
-                _perfTxWithoutRx = 0;
+          cat >> /tmp/RTW88IEEE80211.reset.cpp <<'CPP'
 
-                _dataPathRecoveryCount = 0;
+              _force40MHz =
+                  false;
 
-                IOLog(
-                    "rtw88: HP256G8 v8.5 data-path counters reset\\n"
-                );
+              _fallbackPending =
+                  false;
 
-                $1
-            }x
-          ' "$FILE"
+              _usefulRxCount =
+                  0;
+
+              _perfLastRxFrameCount =
+                  0;
+
+              _perfTxWithoutRx =
+                  0;
+
+              _dataPathRecoveryCount =
+                  0;
+
+              IOLog(
+                  "rtw88: HP256G8 v8.5 data-path counters reset\n"
+              );
+
+
+          CPP
+
+          tail -n +"$LINE" \
+            "$FILE" \
+            >> /tmp/RTW88IEEE80211.reset.cpp
+
+          mv \
+            /tmp/RTW88IEEE80211.reset.cpp \
+            "$FILE"
 
           grep -n \
-            -A 20 \
+            -A 25 \
             "HP256G8 v8.5 data-path counters reset" \
             "$FILE"
 
 
       # ================================================================
-      # 21. TX FLOW CONTROL
+      # 21. TX THRESHOLDS
       # ================================================================
 
       - name: Set HP256G8 TX thresholds
@@ -1089,11 +1438,16 @@ jobs:
           {
               drainPendingFree();
 
+
               if (
                   !_iface ||
                   !_enabled
               ) {
-                  freePacket(m);
+
+                  freePacket(
+                      m
+                  );
+
                   return;
               }
 
@@ -1101,24 +1455,34 @@ jobs:
               const size_t kMinFrame =
                   14;
 
+
               const size_t kMaxFrame =
                   4096;
+
 
               const unsigned int kMaxSegments =
                   32;
 
 
               size_t packetLength =
-                  mbuf_pkthdr_len(m);
+                  mbuf_pkthdr_len(
+                      m
+                  );
+
 
               size_t firstLength =
-                  mbuf_len(m);
+                  mbuf_len(
+                      m
+                  );
+
 
               size_t chainLength =
                   0;
 
+
               unsigned int segments =
                   0;
+
 
               bool malformed =
                   false;
@@ -1129,8 +1493,12 @@ jobs:
                   segment != nullptr;
                   segment = mbuf_next(segment)
               ) {
+
                   size_t length =
-                      mbuf_len(segment);
+                      mbuf_len(
+                          segment
+                      );
+
 
                   segments++;
 
@@ -1140,6 +1508,7 @@ jobs:
                       length > kMaxFrame ||
                       chainLength > kMaxFrame - length
                   ) {
+
                       malformed =
                           true;
 
@@ -1160,6 +1529,7 @@ jobs:
                   firstLength > kMaxFrame ||
                   chainLength != packetLength
               ) {
+
                   IOLog(
                       "rtw88: HP256G8 v8.5 SAFE MBUF drop "
                       "pkthdr=%zu first=%zu chain=%zu segs=%u\n",
@@ -1169,7 +1539,11 @@ jobs:
                       segments
                   );
 
-                  freePacket(m);
+
+                  freePacket(
+                      m
+                  );
+
 
                   return;
               }
@@ -1192,12 +1566,16 @@ jobs:
 
 
               if (nd) {
+
                   IONetworkStats *stats =
                       (IONetworkStats *)
                       nd->getBuffer();
 
-                  if (stats)
+
+                  if (stats) {
+
                       stats->inputPackets++;
+                  }
               }
           }
 
@@ -1206,17 +1584,20 @@ jobs:
 
           BEFORE="$((START - 1))"
 
-          head -n "$BEFORE" "$FILE" \
-            > /tmp/pci.new
+          head -n "$BEFORE" \
+            "$FILE" \
+            > /tmp/RTW88PCIDevice.safe.cpp
 
-          cat /tmp/safe_mbuf.cpp \
-            >> /tmp/pci.new
+          cat \
+            /tmp/safe_mbuf.cpp \
+            >> /tmp/RTW88PCIDevice.safe.cpp
 
-          tail -n +"$END" "$FILE" \
-            >> /tmp/pci.new
+          tail -n +"$END" \
+            "$FILE" \
+            >> /tmp/RTW88PCIDevice.safe.cpp
 
           mv \
-            /tmp/pci.new \
+            /tmp/RTW88PCIDevice.safe.cpp \
             "$FILE"
 
           grep -n \
@@ -1225,7 +1606,7 @@ jobs:
 
 
       # ================================================================
-      # 23. SAFE RX DMA TAG CHECK
+      # 23. SAFE DMA DESCRIPTOR CHECK
       # ================================================================
 
       - name: Apply Safe DMA descriptor recovery
@@ -1263,24 +1644,32 @@ jobs:
               struct rtw_pci *rtwpci =
                   (struct rtw_pci *)rtwdev->priv;
 
+
               const struct rtw_chip_info *chip =
                   rtwdev->chip;
 
+
               struct rtw_pci_rx_buffer_desc *buf_desc;
+
 
               u32 desc_sz =
                   chip->rx_buf_desc_sz;
 
+
               u16 expected =
                   rtwpci->rx_tag;
+
 
               u16 observed =
                   0;
 
+
               int i;
+
 
               static u32 mismatch_count =
                   0;
+
 
               static u32 recovery_count =
                   0;
@@ -1297,7 +1686,7 @@ jobs:
               /*
                * HP256G8 v8.5 SAFE RESYNC
                *
-               * Wait a maximum of 200 us.
+               * 100 x 2us = 200us maximum.
                */
 
               for (
@@ -1305,6 +1694,7 @@ jobs:
                   i < 100;
                   i++
               ) {
+
                   observed =
                       le16_to_cpu(
                           buf_desc->total_pkt_size
@@ -1315,6 +1705,7 @@ jobs:
                       observed ==
                       expected
                   ) {
+
                       rtwpci->rx_tag =
                           (
                               expected +
@@ -1322,6 +1713,7 @@ jobs:
                           )
                           %
                           RX_TAG_MAX;
+
 
                       return true;
                   }
@@ -1336,17 +1728,21 @@ jobs:
               mismatch_count++;
 
 
-              u16 delta;
+              u16 delta =
+                  0;
 
 
               if (
                   expected >=
                   observed
               ) {
+
                   delta =
                       expected -
                       observed;
+
               } else {
+
                   delta =
                       (
                           expected +
@@ -1358,15 +1754,16 @@ jobs:
 
 
               /*
-               * CURRENT descriptor is always rejected.
+               * CURRENT descriptor is always discarded.
                *
-               * Small coherent delta can only realign the NEXT tag.
+               * Small coherent mismatch may realign only NEXT tag.
                */
 
               if (
                   delta > 0 &&
                   delta <= 32
               ) {
+
                   rtwpci->rx_tag =
                       (
                           observed +
@@ -1386,6 +1783,7 @@ jobs:
                           0xff
                       ) == 0
                   ) {
+
                       rtw_warn(
                           rtwdev,
                           "HP256G8 v8.5 SAFE RESYNC "
@@ -1399,7 +1797,9 @@ jobs:
                           recovery_count
                       );
                   }
+
               } else {
+
                   rtwpci->rx_tag =
                       (
                           expected +
@@ -1416,6 +1816,7 @@ jobs:
                           0xff
                       ) == 0
                   ) {
+
                       rtw_warn(
                           rtwdev,
                           "HP256G8 v8.5 SAFE RX reject "
@@ -1438,26 +1839,30 @@ jobs:
 
           BEFORE="$((START - 1))"
 
-          head -n "$BEFORE" "$FILE" \
-            > /tmp/linux_pci.new
+          head -n "$BEFORE" \
+            "$FILE" \
+            > /tmp/pci.safe.c
 
-          cat /tmp/safe_dma.c \
-            >> /tmp/linux_pci.new
+          cat \
+            /tmp/safe_dma.c \
+            >> /tmp/pci.safe.c
 
-          tail -n +"$END" "$FILE" \
-            >> /tmp/linux_pci.new
+          tail -n +"$END" \
+            "$FILE" \
+            >> /tmp/pci.safe.c
 
           mv \
-            /tmp/linux_pci.new \
+            /tmp/pci.safe.c \
             "$FILE"
 
           grep -n \
+            -A 90 \
             "HP256G8 v8.5 SAFE RESYNC" \
             "$FILE"
 
 
       # ================================================================
-      # 24. BLOCK INVALID CURRENT DESCRIPTOR
+      # 24. REJECT BAD CURRENT RX DESCRIPTOR
       # ================================================================
 
       - name: Reject bad RX descriptor before parsing
@@ -1467,27 +1872,39 @@ jobs:
 
           FILE="rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c"
 
-          if ! grep -q \
+          if grep -q \
             "if (!rtw_pci_dma_check(rtwdev, ring, cur_rp))" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                rtw_pci_dma_check
-                \(
-                  rtwdev,
-                  \s*ring,
-                  \s*cur_rp
-                \)
-                \s*;
-              }{
-                if (!rtw_pci_dma_check(rtwdev, ring, cur_rp))
-                    goto next_rp;
-              }x
-            ' "$FILE"
-
+            echo "Descriptor guard already present."
+            exit 0
           fi
+
+          LINE="$(
+            grep -n \
+              "rtw_pci_dma_check(rtwdev, ring, cur_rp);" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          awk -v target="$LINE" '
+          NR == target {
+              print "\t\tif (!rtw_pci_dma_check(rtwdev, ring, cur_rp))"
+              print "\t\t\tgoto next_rp;"
+              next
+          }
+
+          {
+              print
+          }
+          ' "$FILE" > /tmp/pci.guard.c
+
+          mv \
+            /tmp/pci.guard.c \
+            "$FILE"
 
           grep -n \
             -A 8 \
@@ -1507,55 +1924,68 @@ jobs:
 
           FILE="rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c"
 
-          if ! grep -q \
+          if grep -q \
             "HP256G8 v8.5 invalid RX length" \
             "$FILE"
           then
-
-            perl -0pi -e '
-              s{
-                (
-                  pkt_offset\s*=
-                  \s*pkt_desc_sz
-                  \s*\+
-                  \s*pkt_stat\.drv_info_sz
-                  \s*\+
-                  \s*pkt_stat\.shift
-                  \s*;
-                )
-              }{
-                $1
-
-                    if (
-                        !pkt_stat.pkt_len ||
-                        pkt_offset >= RTK_PCI_RX_BUF_SIZE ||
-                        pkt_stat.pkt_len >
-                            RTK_PCI_RX_BUF_SIZE - pkt_offset
-                    ) {
-                        rtw_warn(
-                            rtwdev,
-                            "HP256G8 v8.5 invalid RX length "
-                            "pkt=%u off=%u\\n",
-                            pkt_stat.pkt_len,
-                            pkt_offset
-                        );
-
-                        goto next_rp;
-                    }
-              }x
-            ' "$FILE"
-
+            exit 0
           fi
 
+          LINE="$(
+            grep -n \
+              "pkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +" \
+              "$FILE" \
+              | head -1 \
+              | cut -d: -f1
+          )"
+
+          test -n "$LINE"
+
+          # pkt_offset spans two lines.
+          INSERT="$((LINE + 1))"
+
+          awk -v target="$INSERT" '
+          {
+              print
+
+              if (NR == target) {
+
+                  print ""
+                  print "\t\tif ("
+                  print "\t\t    !pkt_stat.pkt_len ||"
+                  print "\t\t    pkt_offset >= RTK_PCI_RX_BUF_SIZE ||"
+                  print "\t\t    pkt_stat.pkt_len >"
+                  print "\t\t        RTK_PCI_RX_BUF_SIZE - pkt_offset"
+                  print "\t\t) {"
+                  print ""
+                  print "\t\t\trtw_warn("
+                  print "\t\t\t\trtwdev,"
+                  print "\t\t\t\t\"HP256G8 v8.5 invalid RX length \""
+                  print "\t\t\t\t\"pkt=%u off=%u\\n\","
+                  print "\t\t\t\tpkt_stat.pkt_len,"
+                  print "\t\t\t\tpkt_offset"
+                  print "\t\t\t);"
+                  print ""
+                  print "\t\t\tgoto next_rp;"
+                  print "\t\t}"
+                  print ""
+              }
+          }
+          ' "$FILE" > /tmp/pci.length.c
+
+          mv \
+            /tmp/pci.length.c \
+            "$FILE"
+
           grep -n \
-            -A 20 \
+            -A 25 \
             -B 8 \
             "HP256G8 v8.5 invalid RX length" \
             "$FILE"
 
 
       # ================================================================
-      # 26. VALIDATION
+      # 26. VALIDAR TODOS OS PATCHES
       # ================================================================
 
       - name: Validate all v8.5 source changes
@@ -1567,6 +1997,33 @@ jobs:
           HPP="Feixiao/src/kext/RTW88IEEE80211.hpp"
           PCI="Feixiao/src/kext/RTW88PCIDevice.cpp"
           LPCI="rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c"
+
+          echo
+          echo "================================================"
+          echo "WPA2"
+          echo "================================================"
+
+          grep -q \
+            "HP256G8 v8.5 M4 key_length=0" \
+            "$IEEE"
+
+          grep -q \
+            "HP256G8 v8.5 M4 nonce zeroed" \
+            "$IEEE"
+
+          grep -q \
+            "HP256G8 v8.5 received M3" \
+            "$IEEE"
+
+          grep -q \
+            "HP256G8 v8.5 WPA2 settle complete" \
+            "$IEEE"
+
+
+          echo
+          echo "================================================"
+          echo "DATA PATH"
+          echo "================================================"
 
           grep -q \
             "HP256G8 v8.5 Data-Path Recovery active" \
@@ -1589,15 +2046,21 @@ jobs:
             "$IEEE"
 
           grep -q \
-            "scheduleDataPathRecovery" \
+            "HP256G8 v8.5 reconnecting after DATA PATH" \
             "$IEEE"
 
-          grep -q \
-            "runDataPathRecovery" \
-            "$IEEE"
+
+          echo
+          echo "================================================"
+          echo "HEADER"
+          echo "================================================"
 
           grep -q \
             "_usefulRxCount" \
+            "$HPP"
+
+          grep -q \
+            "_dataPathRecoveryCount" \
             "$HPP"
 
           grep -q \
@@ -1605,11 +2068,29 @@ jobs:
             "$HPP"
 
           grep -q \
+            "scheduleDataPathRecovery" \
+            "$HPP"
+
+          grep -q \
+            "runDataPathRecovery" \
+            "$HPP"
+
+
+          echo
+          echo "================================================"
+          echo "SAFE RX"
+          echo "================================================"
+
+          grep -q \
             "HP256G8 v8.5 SAFE MBUF" \
             "$PCI"
 
           grep -q \
             "HP256G8 v8.5 SAFE RESYNC" \
+            "$LPCI"
+
+          grep -q \
+            "HP256G8 v8.5 SAFE RX reject" \
             "$LPCI"
 
           grep -q \
@@ -1624,13 +2105,22 @@ jobs:
             "if (!rtw_pci_dma_check(rtwdev, ring, cur_rp))" \
             "$LPCI"
 
+
+          echo
+          echo "================================================"
+          echo "UNSAFE RX BATCHING CHECK"
+          echo "================================================"
+
           if grep -q \
             "_rxQueued = true;" \
             "$PCI"
           then
+
             echo "ERROR: unsafe RX batching detected"
+
             exit 1
           fi
+
 
           echo
           echo "================================================"
@@ -1647,7 +2137,8 @@ jobs:
         run: |
           set -euxo pipefail
 
-          cd Feixiao/firmware
+          cd \
+            Feixiao/firmware
 
           for fw in \
             rtw8822b_fw.bin \
@@ -1657,6 +2148,7 @@ jobs:
             rtw8812a_fw.bin \
             rtw8814a_fw.bin
           do
+
             if [ ! -s "$fw" ]; then
 
               curl \
@@ -1666,9 +2158,11 @@ jobs:
                 -o "$fw"
 
             fi
+
           done
 
-          ls -lh *.bin
+          ls -lh \
+            *.bin
 
 
       # ================================================================
@@ -1680,10 +2174,25 @@ jobs:
         run: |
           set -euxo pipefail
 
+          echo
+          echo "================================================"
+          echo "MACOS"
+          echo "================================================"
+
           sw_vers
+
+          echo
+          echo "================================================"
+          echo "XCODE"
+          echo "================================================"
 
           xcodebuild \
             -version
+
+          echo
+          echo "================================================"
+          echo "CLANG"
+          echo "================================================"
 
           clang \
             --version
@@ -1703,14 +2212,15 @@ jobs:
 
           echo
           echo "================================================"
-          echo "HP256G8 RTL8821CE V8.5 DATA PATH RECOVERY"
+          echo "HP256G8 RTL8821CE V8.5"
+          echo "DATA PATH RECOVERY"
           echo "================================================"
 
           make all
 
 
       # ================================================================
-      # 30. VERIFY BINARY
+      # 30. VERIFY BUILD OUTPUT
       # ================================================================
 
       - name: Verify HP256G8 v8.5 binary
@@ -1726,7 +2236,18 @@ jobs:
 
           BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
 
-          file "$BIN"
+          echo
+          echo "================================================"
+          echo "KEXT"
+          echo "================================================"
+
+          file \
+            "$BIN"
+
+          echo
+          echo "================================================"
+          echo "CLIENT"
+          echo "================================================"
 
           file \
             Feixiao/build/out/rtw88ctl
@@ -1735,6 +2256,18 @@ jobs:
           echo "================================================"
           echo "V8.5 BINARY MARKERS"
           echo "================================================"
+
+          strings "$BIN" \
+            | grep \
+              "HP256G8 v8.5 M4 key_length=0"
+
+          strings "$BIN" \
+            | grep \
+              "HP256G8 v8.5 M4 nonce zeroed"
+
+          strings "$BIN" \
+            | grep \
+              "HP256G8 v8.5 received M3"
 
           strings "$BIN" \
             | grep \
@@ -1761,7 +2294,7 @@ jobs:
               "HP256G8 v8.5 SAFE RESYNC"
 
           echo
-          echo "Binary markers: OK"
+          echo "V8.5 binary verification: OK"
 
 
       # ================================================================
@@ -1775,9 +2308,11 @@ jobs:
 
           OUT="$RUNNER_TEMP/Feixiao-HP256G8-v8.5-Data-Path-Recovery"
 
-          rm -rf "$OUT"
+          rm -rf \
+            "$OUT"
 
-          mkdir -p "$OUT"
+          mkdir -p \
+            "$OUT"
 
           cp -R \
             Feixiao/build/out/rtw88.kext \
@@ -1797,125 +2332,300 @@ jobs:
           FEIXIAO V8.5 DATA-PATH RECOVERY
           ============================================================
 
+
           CHIP
           ============================================================
 
           RTL8821CE
-          PCI 10EC:C821
+
+          PCI:
+          10EC:C821
 
 
-          V8.5 OBJECTIVE
+          MACOS TARGET
+          ============================================================
+
+          macOS Tahoe
+
+          HP 256 G8
+
+
+          PRIMARY V8.5 OBJECTIVE
           ============================================================
 
           Fix false-connected condition:
 
-          Wi-Fi association = connected
-          RSSI = valid
-          but
-          ARP / IPv4 / gateway traffic = dead
+          State:
+          connected
+
+          RSSI:
+          valid
+
+          Channel:
+          associated
+
+          BUT:
+
+          ARP = dead
+
+          IPv4 = dead
+
+          gateway = unreachable
 
 
           USEFUL RX
           ============================================================
 
-          Raw Wi-Fi RX is no longer considered proof
-          that the network data path is alive.
+          Raw Wi-Fi RX does NOT prove the IP data path is alive.
 
-          Useful RX includes only Ethernet:
+          v8.5 uses useful Ethernet RX:
 
-          IPv4
-          ARP
-          IPv6
+          IPv4:
+          0x0800
+
+          ARP:
+          0x0806
+
+          IPv6:
+          0x86DD
+
+
+          RAW WIFI FRAMES
+          ============================================================
+
+          Management frames do not count as useful data-path RX.
+
+          Examples:
+
+          beacon
+
+          authentication management
+
+          association management
+
+          ADDBA management
+
+          BlockAck control
 
 
           WATCHDOG
           ============================================================
 
-          TX activity without useful Ethernet RX:
+          While connected:
 
-          threshold = 128
+          TX continues
+                 |
+                 v
+          useful Ethernet RX monitored
+                 |
+                 v
+          128 TX without useful RX
+                 |
+                 v
+          DATA PATH STALL
 
-          triggers:
 
-          DATA PATH RECOVERY
+          RSSI WATCHDOG
+          ============================================================
+
+          RSSI >= 0
+
+          also triggers:
+
+          DATA PATH STALL
 
 
           RECOVERY
           ============================================================
 
-          detect stall
-                |
-                v
+          DATA PATH STALL
+                 |
+                 v
+          schedule recovery
+                 |
+                 v
           recovery thread
-                |
-                v
+                 |
+                 v
           doDisconnect()
-                |
-                v
-          teardown association / BA / keys
-                |
-                v
+                 |
+                 v
+          association teardown
+                 |
+                 +--> STA cleanup
+                 |
+                 +--> PTK / GTK cleanup
+                 |
+                 +--> TX BA cleanup
+                 |
+                 +--> RX BA / reorder cleanup
+                 |
+                 v
           wait 250 ms
-                |
-                v
-          reconnect
-                |
-                v
+                 |
+                 v
+          reset health counters
+                 |
+                 v
+          normal Feixiao authentication
+                 |
+                 v
           WPA2
-                |
-                v
+                 |
+                 v
           A-MPDU
 
 
           80 MHZ
           ============================================================
 
-          80 MHz remains enabled as the initial
-          performance attempt.
+          VHT 80 MHz remains the initial performance attempt.
 
-          If a data-path failure occurs while at
-          80 MHz:
+          If a data-path failure occurs at 80 MHz:
 
-          Safe 40 MHz is armed for subsequent
-          reconnection.
+          Safe 40 MHz mode is armed.
 
 
-          SAFETY
+          SAFE 40 MHZ
           ============================================================
 
-          Safe MBUF validation
+          Once an 80 MHz failure occurs:
 
-          Safe RX descriptor validation
+          force40MHz = true
 
-          Bad CURRENT descriptor rejected
-
-          bounded RX tag resync
-
-          RX DMA length bounds
-
-          no RX batching
+          subsequent recovery avoids unstable 80 MHz.
 
 
-          TARGET
+          WPA2
           ============================================================
 
-          Target remains above 100 Mbps when the
-          RTL8821CE can operate stably at 80 MHz.
+          M4 Key Length:
+          0
 
-          This is a development target and is not
-          a guaranteed throughput result.
+          M4 Nonce:
+          zero
+
+          M3 diagnostic:
+          enabled
+
+          A-MPDU settle:
+          100 ms
 
 
-          BACKUP
+          RATE CONTROL
           ============================================================
 
-          Keep v8.2 available as a stable fallback.
+          Firmware automatic rate selection:
 
-          Always use rtw88.kext and rtw88ctl from
-          the SAME artifact.
+          enabled
+
+
+          TX FLOW CONTROL
+          ============================================================
+
+          TX stall threshold:
+
+          96
+
+          TX resume threshold:
+
+          160
+
+
+          SAFE MBUF
+          ============================================================
+
+          Minimum frame:
+
+          14 bytes
+
+          Maximum:
+
+          4096 bytes
+
+          Maximum mbuf segments:
+
+          32
+
+          mbuf packet-header length must match
+          the real chain length.
+
+
+          SAFE DMA
+          ============================================================
+
+          Maximum RX descriptor wait:
+
+          200 us
+
+          Current mismatched descriptor:
+
+          ALWAYS REJECTED
+
+
+          RX TAG RESYNC
+          ============================================================
+
+          bounded delta:
+
+          1..32
+
+          resync applies only to NEXT descriptor.
+
+
+          RX LENGTH
+          ============================================================
+
+          pkt_len must fit inside:
+
+          RTK_PCI_RX_BUF_SIZE
+
+          after descriptor and driver-info offset.
+
+
+          RX BATCHING
+          ============================================================
+
+          Experimental RX batching:
+
+          DISABLED
+
+
+          PERFORMANCE
+          ============================================================
+
+          Target:
+
+          >100 Mbps download
+
+          >100 Mbps upload
+
+          80 MHz is required for best chance of reaching
+          this throughput on RTL8821CE.
+
+          This is a development target.
+
+          It is NOT a throughput guarantee.
+
+
+          IMPORTANT
+          ============================================================
+
+          Keep v8.2 as known-stable backup.
+
+          Always install:
+
+          rtw88.kext
+
+          AND
+
+          rtw88ctl
+
+          from the SAME artifact.
           EOF
 
-          cd "$RUNNER_TEMP"
+          cd \
+            "$RUNNER_TEMP"
 
           zip \
             -r \
@@ -1924,7 +2634,7 @@ jobs:
 
 
       # ================================================================
-      # 32. UPLOAD
+      # 32. UPLOAD ARTIFACT
       # ================================================================
 
       - name: Upload HP256G8 v8.5 artifact
