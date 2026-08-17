@@ -1,0 +1,2052 @@
+name: Build HP256G8 RTL8821CE v8.2 Safe Resync
+
+"on":
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+
+      # ============================================================
+      # 1. FEIXIAO BASE
+      # ============================================================
+
+      - name: Checkout Feixiao
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: e963f43188382eced4ef2fa75d19ce4db2315c68
+          submodules: recursive
+          path: Feixiao
+          fetch-depth: 0
+
+
+      # ============================================================
+      # 2. RTW88-STABLE BASE
+      # ============================================================
+
+      - name: Clone matching rtw88-stable
+        run: |
+          git clone \
+            https://github.com/thegwchr/rtw88-stable.git
+
+          cd rtw88-stable
+
+          git checkout \
+            d029a677c49266fad86750714eb5612becd134d3
+
+          echo
+          echo "========================================"
+          echo " RTW88-STABLE REVISION "
+          echo "========================================"
+
+          git rev-parse HEAD
+
+
+      # ============================================================
+      # 3. APPLY V8.2 SAFE RESYNC
+      # ============================================================
+
+      - name: Apply HP256G8 v8.2 Safe Resync
+        shell: bash
+        run: |
+
+          cat > /tmp/patch_v82.py <<'PY'
+
+          from pathlib import Path
+
+
+          # ============================================================
+          # SOURCE FILES
+          # ============================================================
+
+          feixiao = Path("Feixiao")
+
+          ieee = (
+              feixiao
+              /
+              "src/kext/RTW88IEEE80211.cpp"
+          )
+
+          pci = (
+              feixiao
+              /
+              "src/kext/RTW88PCIDevice.cpp"
+          )
+
+          compat = (
+              feixiao
+              /
+              "src/compat/rtw88_compat.c"
+          )
+
+          linux_pci = Path(
+              "rtw88-stable/"
+              "drivers/net/wireless/realtek/"
+              "rtw88/pci.c"
+          )
+
+
+          for source in (
+              ieee,
+              pci,
+              compat,
+              linux_pci,
+          ):
+
+              if not source.exists():
+
+                  raise SystemExit(
+                      f"ERROR: required source missing: {source}"
+                  )
+
+
+          c = ieee.read_text()
+          p = pci.read_text()
+          r = compat.read_text()
+          lp = linux_pci.read_text()
+
+
+          print("=" * 72)
+          print("HP256G8 RTL8821CE v8.2 SAFE RESYNC")
+          print("=" * 72)
+
+
+          # ============================================================
+          # 1. VERIFY EXISTING TX/DMA CORRECTNESS FIXES
+          # ============================================================
+
+          if (
+              "IOGatedOutputQueue::withTarget"
+              not in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: IOGatedOutputQueue "
+                  "TX serialization missing"
+              )
+
+
+          if (
+              "drainPendingFree()"
+              not in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: deferred DMA free "
+                  "support missing"
+              )
+
+
+          print(
+              "Native TX serialization: OK"
+          )
+
+          print(
+              "Deferred DMA free: OK"
+          )
+
+
+          # ============================================================
+          # 2. AUTOMATIC RATE ADAPTATION
+          # ============================================================
+
+          r = r.replace(
+              "rtwdev->dm_info.fix_rate = DESC_RATE6M;",
+              "rtwdev->dm_info.fix_rate = 0xFF;"
+          )
+
+
+          print(
+              "Firmware automatic rate adaptation: OK"
+          )
+
+
+          # ============================================================
+          # 3. WPA2 M4 KEY LENGTH = 0
+          # ============================================================
+
+          old_keylen = (
+              "    key[3] = 0; key[4] = 16; "
+              "/* key length = 16 (AES-128) */"
+          )
+
+
+          new_keylen = """    if (step == 4) {
+
+              key[3] = 0;
+              key[4] = 0;
+
+              IOLog(
+                  "rtw88: HP256G8 v8.2 M4 key_length=0\\n"
+              );
+
+          } else {
+
+              key[3] = 0;
+              key[4] = 16;
+          }"""
+
+
+          if (
+              "HP256G8 v8.2 M4 key_length=0"
+              not in c
+          ):
+
+              if (
+                  old_keylen not in c
+              ):
+
+                  raise SystemExit(
+                      "ERROR: EAPOL Key Length "
+                      "anchor not found"
+                  )
+
+
+              c = c.replace(
+                  old_keylen,
+                  new_keylen,
+                  1
+              )
+
+
+          print(
+              "WPA2 M4 Key Length: OK"
+          )
+
+
+          # ============================================================
+          # 4. WPA2 M4 NONCE = ZERO
+          # ============================================================
+
+          old_nonce = (
+              "    memcpy(key + 13, _snonce, 32);       "
+              "/* key[13..44] = SNonce */"
+          )
+
+
+          new_nonce = """    if (step == 4) {
+
+              memset(
+                  key + 13,
+                  0,
+                  32
+              );
+
+              IOLog(
+                  "rtw88: HP256G8 v8.2 M4 nonce zeroed\\n"
+              );
+
+          } else {
+
+              memcpy(
+                  key + 13,
+                  _snonce,
+                  32
+              );
+          }"""
+
+
+          if (
+              "HP256G8 v8.2 M4 nonce zeroed"
+              not in c
+          ):
+
+              if (
+                  old_nonce not in c
+              ):
+
+                  raise SystemExit(
+                      "ERROR: EAPOL nonce "
+                      "anchor not found"
+                  )
+
+
+              c = c.replace(
+                  old_nonce,
+                  new_nonce,
+                  1
+              )
+
+
+          print(
+              "WPA2 M4 nonce: OK"
+          )
+
+
+          # ============================================================
+          # 5. M3 DIAGNOSTICS
+          # ============================================================
+
+          m3_anchor = (
+              "    } else if (is_m3) {"
+          )
+
+
+          if (
+              "HP256G8 v8.2 received M3"
+              not in c
+          ):
+
+              if (
+                  m3_anchor not in c
+              ):
+
+                  raise SystemExit(
+                      "ERROR: WPA2 M3 handler "
+                      "not found"
+                  )
+
+
+              c = c.replace(
+                  m3_anchor,
+
+                  """    } else if (is_m3) {
+
+              IOLog(
+                  "rtw88: HP256G8 v8.2 received M3 "
+                  "replay=%02x%02x%02x%02x"
+                  "%02x%02x%02x%02x\\n",
+                  data[9],
+                  data[10],
+                  data[11],
+                  data[12],
+                  data[13],
+                  data[14],
+                  data[15],
+                  data[16]
+              );""",
+
+                  1
+              )
+
+
+          print(
+              "WPA2 M3 diagnostics: OK"
+          )
+
+
+          # ============================================================
+          # 6. WPA2:
+          #    SEND M4 BEFORE PTK/GTK
+          # ============================================================
+
+          if (
+              "sending EAPOL M4 before PTK install"
+              not in c
+          ):
+
+              m3_start = c.find(
+                  "HP256G8 v8.2 received M3"
+              )
+
+
+              if (
+                  m3_start < 0
+              ):
+
+                  raise SystemExit(
+                      "ERROR: patched M3 region "
+                      "not found"
+                  )
+
+
+              ptk_anchor = (
+                  "if (!installKey("
+                  "&_ptkConf, "
+                  "true, "
+                  "0, "
+                  "WLAN_CIPHER_SUITE_CCMP,"
+              )
+
+
+              m4_anchor = (
+                  "sendEAPOLKey("
+                  "4, "
+                  "_replayCtr, "
+                  "false, "
+                  "false, "
+                  "true);"
+              )
+
+
+              state_anchor = (
+                  "_state = "
+                  "RTW88_STATE_CONNECTED;"
+              )
+
+
+              start = c.find(
+                  ptk_anchor,
+                  m3_start
+              )
+
+
+              if (
+                  start < 0
+              ):
+
+                  raise SystemExit(
+                      "ERROR: PTK installation "
+                      "anchor not found"
+                  )
+
+
+              send4 = c.find(
+                  m4_anchor,
+                  start
+              )
+
+
+              if (
+                  send4 < 0
+              ):
+
+                  raise SystemExit(
+                      "ERROR: EAPOL M4 "
+                      "anchor not found"
+                  )
+
+
+              end = c.find(
+                  state_anchor,
+                  send4
+              )
+
+
+              if (
+                  end < 0
+              ):
+
+                  raise SystemExit(
+                      "ERROR: CONNECTED state "
+                      "anchor not found"
+                  )
+
+
+              end += len(
+                  state_anchor
+              )
+
+
+              old_block = c[
+                  start:end
+              ]
+
+
+              if (
+                  "installKey(&_gtkConf"
+                  not in old_block
+              ):
+
+                  raise SystemExit(
+                      "ERROR: selected WPA2 block "
+                      "has no GTK installation"
+                  )
+
+
+              new_block = """IOLog(
+              "rtw88: HP256G8 v8.2 sending EAPOL M4 before PTK install\\n"
+          );
+
+          sendEAPOLKey(
+              4,
+              _replayCtr,
+              false,
+              false,
+              true
+          );
+
+          /*
+           * Submit M4 before enabling the
+           * pairwise hardware CCMP key.
+           */
+
+          IOSleep(
+              40
+          );
+
+          IOLog(
+              "rtw88: HP256G8 v8.2 M4 submitted, installing PTK\\n"
+          );
+
+          if (!installKey(
+                  &_ptkConf,
+                  true,
+                  0,
+                  WLAN_CIPHER_SUITE_CCMP,
+                  _ptk + 32,
+                  16))
+              return;
+
+          uint32_t groupCipher =
+              (
+                  _targetBSS.group_cipher ==
+                  WLAN_CIPHER_SUITE_TKIP
+              )
+              ?
+              WLAN_CIPHER_SUITE_TKIP
+              :
+              WLAN_CIPHER_SUITE_CCMP;
+
+          if (
+              gtk_len
+              &&
+              !installKey(
+                  &_gtkConf,
+                  false,
+                  gtk_idx,
+                  groupCipher,
+                  gtk,
+                  gtk_len
+              )
+          )
+              return;
+
+          IOLog(
+              "rtw88: HP256G8 v8.2 PTK/GTK installed after M4\\n"
+          );
+
+          _state =
+              RTW88_STATE_CONNECTED;"""
+
+
+              c = (
+                  c[:start]
+                  +
+                  new_block
+                  +
+                  c[end:]
+              )
+
+
+          print(
+              "WPA2 M4/PTK/GTK ordering: OK"
+          )
+
+
+          # ============================================================
+          # 7. A-MPDU AFTER WPA2 SETTLE
+          # ============================================================
+
+          old_ampdu = (
+              "        startTxAggregation();   "
+              "/* keys are installed — "
+              "negotiate uplink A-MPDU */"
+          )
+
+
+          if (
+              "HP256G8 v8.2 WPA2 settle complete"
+              not in c
+          ):
+
+              if (
+                  old_ampdu not in c
+              ):
+
+                  raise SystemExit(
+                      "ERROR: A-MPDU start "
+                      "anchor not found"
+                  )
+
+
+              c = c.replace(
+                  old_ampdu,
+
+                  """        IOSleep(
+              100
+          );
+
+          IOLog(
+              "rtw88: HP256G8 v8.2 WPA2 settle complete, starting A-MPDU\\n"
+          );
+
+          startTxAggregation();""",
+
+                  1
+              )
+
+
+          print(
+              "A-MPDU WPA2 settle: OK"
+          )
+
+
+          # ============================================================
+          # 8. SAFE MODE:
+          #    KEEP VHT AT 40 MHz FOR THIS TEST
+          # ============================================================
+
+          enabled80 = (
+              "if (chip80 && "
+              "vhtWidth == 1 && "
+              "vhtSeg0 != 0) {"
+          )
+
+
+          disabled80 = (
+              "if (false && chip80 && "
+              "vhtWidth == 1 && "
+              "vhtSeg0 != 0) {"
+          )
+
+
+          if (
+              disabled80 not in c
+          ):
+
+              if (
+                  enabled80 not in c
+              ):
+
+                  raise SystemExit(
+                      "ERROR: VHT80 negotiation "
+                      "anchor not found"
+                  )
+
+
+              c = c.replace(
+                  enabled80,
+                  disabled80,
+                  1
+              )
+
+
+          print(
+              "VHT maximum width: 40 MHz SAFE"
+          )
+
+
+          # ============================================================
+          # 9. V8.2 IDENTIFICATION
+          # ============================================================
+
+          chandef_log = (
+              '    IOLog('
+              '"rtw88: connected chandef: '
+              '%u MHz '
+              '(primary=%u cf1=%u)\\n",'
+          )
+
+
+          if (
+              "HP256G8 v8.2 Safe Resync active"
+              not in c
+          ):
+
+              if (
+                  chandef_log not in c
+              ):
+
+                  raise SystemExit(
+                      "ERROR: connected chandef "
+                      "log anchor not found"
+                  )
+
+
+              c = c.replace(
+                  chandef_log,
+
+                  '    IOLog('
+                  '"rtw88: HP256G8 v8.2 '
+                  'Safe Resync active\\n");\n'
+                  +
+                  chandef_log,
+
+                  1
+              )
+
+
+          print(
+              "Build identification: OK"
+          )
+
+
+          # ============================================================
+          # 10. TX FLOW CONTROL
+          # ============================================================
+
+          p = p.replace(
+              "static constexpr unsigned int "
+              "kRTW88TxStallAvail = 128;",
+
+              "static constexpr unsigned int "
+              "kRTW88TxStallAvail = 96;"
+          )
+
+
+          p = p.replace(
+              "static constexpr unsigned int "
+              "kRTW88TxResumeAvail = 192;",
+
+              "static constexpr unsigned int "
+              "kRTW88TxResumeAvail = 160;"
+          )
+
+
+          if (
+              "kRTW88TxStallAvail = 96;"
+              not in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: TX stall threshold "
+                  "is not 96"
+              )
+
+
+          if (
+              "kRTW88TxResumeAvail = 160;"
+              not in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: TX resume threshold "
+                  "is not 160"
+              )
+
+
+          print(
+              "TX thresholds 96/160: OK"
+          )
+
+
+          # ============================================================
+          # 11. SAFE MACOS MBUF INJECTION
+          #
+          # No RX batching.
+          # Validate the entire mbuf chain.
+          # ============================================================
+
+          inject_start = p.find(
+              "void RTW88PCIDevice::injectRxFrame(mbuf_t m)"
+          )
+
+
+          inject_end = p.find(
+              "/* ------------------------------------------------------------------ */\n"
+              "/*  DMA coherent allocation",
+              inject_start
+          )
+
+
+          if (
+              inject_start < 0
+              or
+              inject_end < 0
+          ):
+
+              raise SystemExit(
+                  "ERROR: injectRxFrame "
+                  "boundaries not found"
+              )
+
+
+          safe_inject = """void RTW88PCIDevice::injectRxFrame(mbuf_t m)
+          {
+              drainPendingFree();
+
+              if (
+                  !_iface
+                  ||
+                  !_enabled
+              ) {
+
+                  freePacket(m);
+                  return;
+              }
+
+              /*
+               * HP256G8 v8.2 SAFE MBUF
+               *
+               * Validate the complete mbuf chain
+               * before giving it to XNU.
+               */
+
+              const size_t kMinFrame = 14;
+              const size_t kMaxFrame = 4096;
+
+              const unsigned int kMaxSegments = 32;
+
+              size_t packetLength =
+                  mbuf_pkthdr_len(m);
+
+              size_t firstLength =
+                  mbuf_len(m);
+
+              size_t chainLength = 0;
+
+              unsigned int segments = 0;
+
+              bool malformed = false;
+
+
+              for (
+                  mbuf_t segment = m;
+                  segment != nullptr;
+                  segment = mbuf_next(segment)
+              ) {
+
+                  size_t length =
+                      mbuf_len(segment);
+
+                  segments++;
+
+
+                  if (
+                      segments > kMaxSegments
+                  ) {
+
+                      malformed = true;
+                      break;
+                  }
+
+
+                  if (
+                      length > kMaxFrame
+                  ) {
+
+                      malformed = true;
+                      break;
+                  }
+
+
+                  if (
+                      chainLength >
+                      (
+                          kMaxFrame
+                          -
+                          length
+                      )
+                  ) {
+
+                      malformed = true;
+                      break;
+                  }
+
+
+                  chainLength +=
+                      length;
+              }
+
+
+              if (
+                  malformed
+                  ||
+                  packetLength < kMinFrame
+                  ||
+                  packetLength > kMaxFrame
+                  ||
+                  firstLength < kMinFrame
+                  ||
+                  firstLength > kMaxFrame
+                  ||
+                  chainLength != packetLength
+              ) {
+
+                  IOLog(
+                      "rtw88: HP256G8 v8.2 SAFE MBUF drop "
+                      "pkthdr=%zu first=%zu chain=%zu segs=%u\\n",
+                      packetLength,
+                      firstLength,
+                      chainLength,
+                      segments
+                  );
+
+                  freePacket(m);
+
+                  return;
+              }
+
+
+              /*
+               * Conservative proven path.
+               *
+               * Do not batch RX frames.
+               */
+
+              _iface->inputPacket(
+                  m,
+                  0,
+                  IONetworkInterface::kInputOptionQueuePacket
+              );
+
+
+              _iface->flushInputQueue();
+
+
+              IONetworkData *nd =
+                  _iface->getNetworkData(
+                      kIONetworkStatsKey
+                  );
+
+
+              if (
+                  nd
+              ) {
+
+                  IONetworkStats *stats =
+                      (IONetworkStats *)
+                      nd->getBuffer();
+
+
+                  if (
+                      stats
+                  ) {
+
+                      stats->inputPackets++;
+                  }
+              }
+          }
+
+
+          """
+
+
+          p = (
+              p[:inject_start]
+              +
+              safe_inject
+              +
+              p[inject_end:]
+          )
+
+
+          if (
+              "_rxQueued = true;"
+              in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: experimental RX batching "
+                  "still present"
+              )
+
+
+          print(
+              "Safe macOS mbuf validation: OK"
+          )
+
+
+          # ============================================================
+          # 12. SAFE DMA TAG CHECK
+          #
+          # KEY V8.2 DIFFERENCE:
+          #
+          # mismatch:
+          #
+          #   wait
+          #   discard CURRENT descriptor
+          #   next expected = observed + 1
+          #
+          # The mismatched descriptor itself is NEVER parsed.
+          # ============================================================
+
+          dma_start = lp.find(
+              "static void rtw_pci_dma_check("
+          )
+
+
+          if (
+              dma_start < 0
+          ):
+
+              # Allows rebuilding if return type changed
+              dma_start = lp.find(
+                  "static bool rtw_pci_dma_check("
+              )
+
+
+          dma_end = lp.find(
+              "static u32 __pci_get_hw_tx_ring_rp(",
+              dma_start
+          )
+
+
+          if (
+              dma_start < 0
+              or
+              dma_end < 0
+          ):
+
+              raise SystemExit(
+                  "ERROR: rtw_pci_dma_check "
+                  "function boundaries missing"
+              )
+
+
+          old_dma_function = lp[
+              dma_start:dma_end
+          ]
+
+
+          if (
+              "rtwpci->rx_tag"
+              not in old_dma_function
+          ):
+
+              raise SystemExit(
+                  "ERROR: selected function "
+                  "has no RX tag handling"
+              )
+
+
+          safe_dma = """static bool rtw_pci_dma_check(
+                  struct rtw_dev *rtwdev,
+                  struct rtw_pci_rx_ring *rx_ring,
+                  u32 idx)
+          {
+              struct rtw_pci *rtwpci =
+                  (struct rtw_pci *)rtwdev->priv;
+
+              const struct rtw_chip_info *chip =
+                  rtwdev->chip;
+
+              struct rtw_pci_rx_buffer_desc *buf_desc;
+
+              u32 desc_sz =
+                  chip->rx_buf_desc_sz;
+
+              u16 expected =
+                  rtwpci->rx_tag;
+
+              u16 observed = 0;
+
+              int i;
+
+              static u32 mismatch_count = 0;
+
+              static u32 recovery_count = 0;
+
+
+              buf_desc =
+                  (struct rtw_pci_rx_buffer_desc *)
+                  (
+                      rx_ring->r.head
+                      +
+                      idx * desc_sz
+                  );
+
+
+              /*
+               * HP256G8 v8.2 SAFE RESYNC
+               *
+               * Wait up to 200 us for the
+               * expected completion tag.
+               */
+
+              for (
+                  i = 0;
+                  i < 100;
+                  i++
+              ) {
+
+                  observed =
+                      le16_to_cpu(
+                          buf_desc->total_pkt_size
+                      );
+
+
+                  if (
+                      observed ==
+                      expected
+                  ) {
+
+                      rtwpci->rx_tag =
+                          (
+                              expected
+                              +
+                              1
+                          )
+                          %
+                          RX_TAG_MAX;
+
+
+                      return true;
+                  }
+
+
+                  udelay(
+                      2
+                  );
+              }
+
+
+              /*
+               * Still mismatched after 200 us.
+               *
+               * IMPORTANT:
+               *
+               * The CURRENT descriptor is rejected.
+               *
+               * Caller must NOT:
+               *
+               * - sync it for CPU parsing
+               * - parse rx_desc
+               * - allocate/copy packet
+               * - submit mbuf to macOS
+               *
+               * We only use observed to establish
+               * which tag the NEXT ring slot should
+               * contain.
+               */
+
+              mismatch_count++;
+
+
+              u16 delta =
+                  (
+                      expected
+                      -
+                      observed
+                  )
+                  &
+                  (
+                      RX_TAG_MAX
+                      -
+                      1
+                  );
+
+
+              /*
+               * Only accept a bounded sequence correction.
+               *
+               * The notebook log showed a stable
+               * delta of 7.
+               *
+               * A huge/random difference is treated
+               * as suspicious and does not rebase.
+               */
+
+              if (
+                  delta > 0
+                  &&
+                  delta <= 32
+              ) {
+
+                  rtwpci->rx_tag =
+                      (
+                          observed
+                          +
+                          1
+                      )
+                      %
+                      RX_TAG_MAX;
+
+
+                  recovery_count++;
+
+
+                  if (
+                      recovery_count == 1
+                      ||
+                      (
+                          recovery_count
+                          &
+                          0xff
+                      )
+                      ==
+                      0
+                  ) {
+
+                      rtw_warn(
+                          rtwdev,
+
+                          "HP256G8 v8.2 SAFE RESYNC "
+                          "drop current descriptor "
+                          "expected=%u observed=%u "
+                          "delta=%u next=%u count=%u\\n",
+
+                          expected,
+                          observed,
+                          delta,
+                          rtwpci->rx_tag,
+                          recovery_count
+                      );
+                  }
+
+              } else {
+
+                  /*
+                   * Suspicious mismatch.
+                   *
+                   * Do not trust observed as a new
+                   * sequence origin.
+                   *
+                   * Advance conservatively one slot.
+                   */
+
+                  rtwpci->rx_tag =
+                      (
+                          expected
+                          +
+                          1
+                      )
+                      %
+                      RX_TAG_MAX;
+
+
+                  if (
+                      mismatch_count == 1
+                      ||
+                      (
+                          mismatch_count
+                          &
+                          0xff
+                      )
+                      ==
+                      0
+                  ) {
+
+                      rtw_warn(
+                          rtwdev,
+
+                          "HP256G8 v8.2 SAFE RX reject "
+                          "expected=%u observed=%u "
+                          "delta=%u count=%u\\n",
+
+                          expected,
+                          observed,
+                          delta,
+                          mismatch_count
+                      );
+                  }
+              }
+
+
+              return false;
+          }
+
+
+          """
+
+
+          lp = (
+              lp[:dma_start]
+              +
+              safe_dma
+              +
+              lp[dma_end:]
+          )
+
+
+          print(
+              "Safe DMA tag recovery: OK"
+          )
+
+
+          # ============================================================
+          # 13. BLOCK REJECTED DESCRIPTOR BEFORE DMA PARSE
+          # ============================================================
+
+          old_rx_head = (
+              "\twhile (count--) {\n"
+              "\t\trtw_pci_dma_check(rtwdev, ring, cur_rp);\n"
+              "\t\tskb = ring->buf[cur_rp];\n"
+              "\t\tdma = *((dma_addr_t *)skb->cb);\n"
+              "\t\tdma_sync_single_for_cpu(rtwdev->dev, dma, "
+              "RTK_PCI_RX_BUF_SIZE,\n"
+              "\t\t\t\t\tDMA_FROM_DEVICE);\n"
+              "\t\trx_desc = skb->data;\n"
+          )
+
+
+          new_rx_head = (
+              "\twhile (count--) {\n"
+              "\t\tskb = ring->buf[cur_rp];\n"
+              "\t\tdma = *((dma_addr_t *)skb->cb);\n"
+              "\n"
+              "\t\tif (!rtw_pci_dma_check(rtwdev, ring, cur_rp))\n"
+              "\t\t\tgoto next_rp;\n"
+              "\n"
+              "\t\tdma_sync_single_for_cpu(rtwdev->dev, dma, "
+              "RTK_PCI_RX_BUF_SIZE,\n"
+              "\t\t\t\t\tDMA_FROM_DEVICE);\n"
+              "\t\trx_desc = skb->data;\n"
+          )
+
+
+          # If already converted by another Safe build,
+          # leave it alone.
+
+          safe_rx_call = (
+              "if (!rtw_pci_dma_check("
+              "rtwdev, ring, cur_rp))"
+          )
+
+
+          if (
+              safe_rx_call not in lp
+          ):
+
+              if (
+                  old_rx_head not in lp
+              ):
+
+                  raise SystemExit(
+                      "ERROR: RX NAPI head "
+                      "anchor not found"
+                  )
+
+
+              lp = lp.replace(
+                  old_rx_head,
+                  new_rx_head,
+                  1
+              )
+
+
+          print(
+              "Rejected descriptor parse blocking: OK"
+          )
+
+
+          # ============================================================
+          # 14. VALIDATE RX PACKET LENGTH BEFORE COPY
+          # ============================================================
+
+          rx_length_marker = (
+              "HP256G8 v8.2 invalid RX length"
+          )
+
+
+          if (
+              rx_length_marker not in lp
+          ):
+
+              old_length_block = (
+                  "\t\t/* offset from rx_desc to payload */\n"
+                  "\t\tpkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +\n"
+                  "\t\t\t     pkt_stat.shift;\n"
+                  "\n"
+                  "\t\t/* allocate a new skb for this frame,\n"
+                  "\t\t * discard the frame if none available\n"
+                  "\t\t */\n"
+                  "\t\tnew_len = pkt_stat.pkt_len + pkt_offset;\n"
+              )
+
+
+              new_length_block = (
+                  "\t\t/* offset from rx_desc to payload */\n"
+                  "\t\tpkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +\n"
+                  "\t\t\t     pkt_stat.shift;\n"
+                  "\n"
+                  "\t\t/* HP256G8 v8.2: never copy beyond DMA RX buffer. */\n"
+                  "\t\tif (!pkt_stat.pkt_len ||\n"
+                  "\t\t    pkt_offset >= RTK_PCI_RX_BUF_SIZE ||\n"
+                  "\t\t    pkt_stat.pkt_len > "
+                  "RTK_PCI_RX_BUF_SIZE - pkt_offset) {\n"
+                  "\t\t\trtw_warn(rtwdev,\n"
+                  "\t\t\t\t \"HP256G8 v8.2 invalid RX length "
+                  "pkt=%u off=%u\\n\",\n"
+                  "\t\t\t\t pkt_stat.pkt_len, pkt_offset);\n"
+                  "\t\t\tgoto next_rp;\n"
+                  "\t\t}\n"
+                  "\n"
+                  "\t\t/* allocate a new skb for this frame,\n"
+                  "\t\t * discard the frame if none available\n"
+                  "\t\t */\n"
+                  "\t\tnew_len = pkt_stat.pkt_len + pkt_offset;\n"
+              )
+
+
+              if (
+                  old_length_block not in lp
+              ):
+
+                  raise SystemExit(
+                      "ERROR: RX packet length "
+                      "anchor not found"
+                  )
+
+
+              lp = lp.replace(
+                  old_length_block,
+                  new_length_block,
+                  1
+              )
+
+
+          print(
+              "RX packet length bounds: OK"
+          )
+
+
+          # ============================================================
+          # 15. FINAL SAFETY VALIDATION
+          # ============================================================
+
+          required_cpp = [
+
+              "HP256G8 v8.2 Safe Resync active",
+
+              "HP256G8 v8.2 M4 key_length=0",
+
+              "HP256G8 v8.2 M4 nonce zeroed",
+
+              "HP256G8 v8.2 received M3",
+
+              "sending EAPOL M4 before PTK install",
+
+              "M4 submitted, installing PTK",
+
+              "PTK/GTK installed after M4",
+
+              "WPA2 settle complete",
+
+              "HP256G8 v8.2 SAFE MBUF drop",
+          ]
+
+
+          for marker in required_cpp:
+
+              if (
+                  marker not in
+                  (
+                      c
+                      +
+                      p
+                  )
+              ):
+
+                  raise SystemExit(
+                      "ERROR: missing C++ marker: "
+                      f"{marker}"
+                  )
+
+
+          required_dma = [
+
+              "static bool rtw_pci_dma_check(",
+
+              "HP256G8 v8.2 SAFE RESYNC",
+
+              "drop current descriptor",
+
+              "delta <= 32",
+
+              "observed",
+
+              "rtwpci->rx_tag",
+
+              "return false;",
+
+              "if (!rtw_pci_dma_check(rtwdev, ring, cur_rp))",
+
+              "HP256G8 v8.2 invalid RX length",
+          ]
+
+
+          for marker in required_dma:
+
+              if (
+                  marker not in lp
+              ):
+
+                  raise SystemExit(
+                      "ERROR: missing Safe DMA marker: "
+                      f"{marker}"
+                  )
+
+
+          # ============================================================
+          # 16. ENSURE UNSAFE V8 FEATURES ARE ABSENT
+          # ============================================================
+
+          if (
+              "_rxQueued = true;"
+              in p
+          ):
+
+              raise SystemExit(
+                  "ERROR: experimental RX batching "
+                  "still present"
+              )
+
+
+          if (
+              "HP256G8 v8 RX tag resync"
+              in lp
+          ):
+
+              raise SystemExit(
+                  "ERROR: unsafe v8 forced resync "
+                  "still present"
+              )
+
+
+          if (
+              "pci bus timeout, check dma status"
+              in lp[
+                  lp.find(
+                      "static bool rtw_pci_dma_check("
+                  ):
+                  lp.find(
+                      "static u32 __pci_get_hw_tx_ring_rp("
+                  )
+              ]
+          ):
+
+              raise SystemExit(
+                  "ERROR: old RX timeout warning "
+                  "still exists inside DMA check"
+              )
+
+
+          print(
+              "Unsafe v8 RX batching: ABSENT"
+          )
+
+          print(
+              "Unsafe v8 forced current-descriptor resync: ABSENT"
+          )
+
+
+          # ============================================================
+          # 17. WRITE PATCHED SOURCES
+          # ============================================================
+
+          ieee.write_text(
+              c
+          )
+
+
+          pci.write_text(
+              p
+          )
+
+
+          compat.write_text(
+              r
+          )
+
+
+          linux_pci.write_text(
+              lp
+          )
+
+
+          print()
+          print("=" * 72)
+          print("HP256G8 v8.2 PATCH APPLIED SUCCESSFULLY")
+          print("=" * 72)
+          print("WPA2 v7 fix: RETAINED")
+          print("M4 before PTK: ENABLED")
+          print("Safe mbuf validation: ENABLED")
+          print("RX descriptor validation: ENABLED")
+          print("Bad current descriptor: DISCARDED")
+          print("Next RX tag Safe Resync: ENABLED")
+          print("RX packet bounds: ENABLED")
+          print("RX batching: DISABLED")
+          print("VHT width: 40 MHz SAFE")
+          print("=" * 72)
+
+
+          PY
+
+
+          python3 /tmp/patch_v82.py
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY V8.2 IEEE "
+          echo "========================================"
+
+          grep -n \
+            "HP256G8 v8.2" \
+            Feixiao/src/kext/RTW88IEEE80211.cpp
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY SAFE MBUF "
+          echo "========================================"
+
+          grep -n \
+            -A 90 \
+            -B 15 \
+            "HP256G8 v8.2 SAFE MBUF" \
+            Feixiao/src/kext/RTW88PCIDevice.cpp
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY SAFE DMA RESYNC "
+          echo "========================================"
+
+          grep -n \
+            -A 130 \
+            -B 20 \
+            "HP256G8 v8.2 SAFE RESYNC" \
+            rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY INVALID RX LENGTH GUARD "
+          echo "========================================"
+
+          grep -n \
+            -A 20 \
+            -B 15 \
+            "HP256G8 v8.2 invalid RX length" \
+            rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+
+
+          echo
+          echo "========================================"
+          echo " VERIFY TX "
+          echo "========================================"
+
+          grep -n \
+            "kRTW88TxStallAvail" \
+            Feixiao/src/kext/RTW88PCIDevice.cpp
+
+          grep -n \
+            "kRTW88TxResumeAvail" \
+            Feixiao/src/kext/RTW88PCIDevice.cpp
+
+
+      # ============================================================
+      # 4. DOWNLOAD FIRMWARE
+      # ============================================================
+
+      - name: Download firmware
+        run: |
+
+          cd Feixiao/firmware
+
+          for fw in \
+            rtw8822b_fw.bin \
+            rtw8822c_fw.bin \
+            rtw8821c_fw.bin \
+            rtw8821a_fw.bin \
+            rtw8812a_fw.bin \
+            rtw8814a_fw.bin
+
+          do
+
+            if [ ! -s "$fw" ]; then
+
+              echo "Downloading $fw"
+
+              curl \
+                -L \
+                --fail \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
+                -o "$fw"
+
+            fi
+
+          done
+
+
+          echo
+          echo "========================================"
+          echo " FIRMWARE FILES "
+          echo "========================================"
+
+          ls -lh *.bin
+
+
+      # ============================================================
+      # 5. BUILD ENVIRONMENT
+      # ============================================================
+
+      - name: Show build environment
+        run: |
+
+          echo
+          echo "========================================"
+          echo " MACOS "
+          echo "========================================"
+
+          sw_vers
+
+
+          echo
+          echo "========================================"
+          echo " XCODE "
+          echo "========================================"
+
+          xcodebuild -version
+
+
+          echo
+          echo "========================================"
+          echo " CLANG "
+          echo "========================================"
+
+          clang --version
+
+
+          echo
+          echo "========================================"
+          echo " FEIXIAO REVISION "
+          echo "========================================"
+
+          git \
+            -C Feixiao \
+            rev-parse \
+            HEAD
+
+
+          echo
+          echo "========================================"
+          echo " RTW88-STABLE REVISION "
+          echo "========================================"
+
+          git \
+            -C rtw88-stable \
+            rev-parse \
+            HEAD
+
+
+      # ============================================================
+      # 6. BUILD
+      # ============================================================
+
+      - name: Build HP256G8 v8.2
+        working-directory: Feixiao
+        run: |
+
+          make clean || true
+
+          echo
+          echo "========================================"
+          echo " BUILD HP256G8 RTL8821CE V8.2 SAFE RESYNC "
+          echo "========================================"
+
+          make all
+
+
+      # ============================================================
+      # 7. VERIFY BUILD OUTPUT
+      # ============================================================
+
+      - name: Verify v8.2 binary
+        run: |
+
+          test \
+            -d \
+            Feixiao/build/out/rtw88.kext
+
+
+          test \
+            -f \
+            Feixiao/build/out/rtw88ctl
+
+
+          echo
+          echo "========================================"
+          echo " KEXT "
+          echo "========================================"
+
+          file \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88
+
+
+          echo
+          echo "========================================"
+          echo " RTW88CTL "
+          echo "========================================"
+
+          file \
+            Feixiao/build/out/rtw88ctl
+
+
+          echo
+          echo "========================================"
+          echo " V8.2 BINARY MARKERS "
+          echo "========================================"
+
+          strings \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+            | grep -E \
+              "HP256G8 v8.2|SAFE RESYNC|SAFE MBUF"
+
+
+          echo
+          echo "========================================"
+          echo " WPA2 / AMPDU "
+          echo "========================================"
+
+          strings \
+            Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+            | grep -E \
+              "WPA2 connected|EAPOL|ADDBA|A-MPDU|connected chandef" \
+            | head -150 \
+            || true
+
+
+      # ============================================================
+      # 8. PACKAGE
+      # ============================================================
+
+      - name: Package v8.2
+        run: |
+
+          OUT="${{ runner.temp }}/Feixiao-HP256G8-v8.2-Safe-Resync"
+
+
+          rm -rf \
+            "$OUT"
+
+
+          mkdir -p \
+            "$OUT"
+
+
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "$OUT/"
+
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "$OUT/"
+
+
+          chmod +x \
+            "$OUT/rtw88ctl"
+
+
+          cat > "$OUT/BUILD-INFO.txt" <<'EOF'
+
+          HP256G8 RTL8821CE
+          =============================================
+
+          BUILD
+          =============================================
+
+          v8.2 Safe Resync
+
+
+          BASE
+          =============================================
+
+          Feixiao:
+          e963f43188382eced4ef2fa75d19ce4db2315c68
+
+          rtw88-stable:
+          d029a677c49266fad86750714eb5612becd134d3
+
+
+          WPA2
+          =============================================
+
+          M4 Key Length = 0
+
+          M4 nonce = zero
+
+          M4 sent before hardware PTK install
+
+          GTK installed after M4
+
+          A-MPDU starts after WPA2 settle
+
+
+          V8.2 SAFE RX
+          =============================================
+
+          Current descriptor mismatch:
+
+              WAIT up to 200 us
+
+                      ↓
+
+              expected still != observed
+
+                      ↓
+
+              DROP CURRENT DESCRIPTOR
+
+                      ↓
+
+              CURRENT DESCRIPTOR IS NOT PARSED
+
+                      ↓
+
+              if delta is small/bounded:
+
+                  next expected =
+                  observed + 1
+
+                      ↓
+
+              process NEXT descriptor only
+
+
+          IMPORTANT DIFFERENCE FROM V8
+          =============================================
+
+          v8:
+
+          mismatch
+          → rebase
+          → current descriptor could continue
+
+
+          v8.2:
+
+          mismatch
+          → current descriptor discarded
+          → rebase applies only to NEXT descriptor
+
+
+          PROTECTION
+          =============================================
+
+          - complete mbuf-chain length validation
+
+          - maximum macOS frame length 4096
+
+          - RX pkt_len + pkt_offset bounds check
+
+          - no experimental RX batching
+
+          - per-frame flushInputQueue restored
+
+          - suspicious large tag delta does not trust observed
+
+
+          OBSERVED HP256G8 PATTERN
+          =============================================
+
+          v8.1 showed stable difference:
+
+          expected - observed = 7
+
+          Example:
+
+          expected 610
+          observed 603
+
+          expected 866
+          observed 859
+
+          expected 1122
+          observed 1115
+
+
+          SAFE RESYNC WINDOW
+          =============================================
+
+          Accepted sequence delta:
+
+          1 through 32
+
+          Current descriptor is discarded
+          even when correction is accepted.
+
+
+          TX
+          =============================================
+
+          IOGatedOutputQueue serialization retained
+
+          Deferred DMA free retained
+
+          Stall threshold:
+          96
+
+          Resume threshold:
+          160
+
+
+          RADIO
+          =============================================
+
+          2.4 GHz supported
+
+          5 GHz supported
+
+          HT/VHT retained
+
+          VHT maximum for Safe build:
+          40 MHz
+
+          A-MPDU retained
+
+
+          EXPECTED LOG
+          =============================================
+
+          HP256G8 v8.2 Safe Resync active
+
+          HP256G8 v8.2 M4 key_length=0
+
+          HP256G8 v8.2 M4 nonce zeroed
+
+          HP256G8 v8.2 received M3
+
+          HP256G8 v8.2 SAFE RESYNC
+          drop current descriptor
+
+          HP256G8 v8.2 WPA2 settle complete
+
+
+          SUCCESS CONDITION
+          =============================================
+
+          DHCP receives a real 192.168.1.x address
+
+          RX Bytes continuously increases
+
+          No kernel panic
+
+          No continuous descriptor-drop loop
+
+          Stable gateway ping
+
+
+          NEXT STEP
+          =============================================
+
+          Only after Safe Resync is stable:
+
+          enable VHT 80 MHz again
+
+          then tune throughput above 100 Mbps.
+
+
+          IMPORTANT
+          =============================================
+
+          Experimental driver.
+
+          Keep v7 as backup.
+
+          Do not leave duplicate rtw88.kext files
+          in EFI/OC/Kexts.
+
+          Always use rtw88.kext and rtw88ctl
+          from this exact build together.
+
+          EOF
+
+
+          cd \
+            "${{ runner.temp }}"
+
+
+          zip \
+            -r \
+            Feixiao_HP256G8_v8_2_Safe_Resync.zip \
+            Feixiao-HP256G8-v8.2-Safe-Resync
+
+
+      # ============================================================
+      # 9. UPLOAD ARTIFACT
+      # ============================================================
+
+      - name: Upload v8.2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-HP256G8-v8.2-Safe-Resync
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_2_Safe_Resync.zip
+          retention-days: 7
