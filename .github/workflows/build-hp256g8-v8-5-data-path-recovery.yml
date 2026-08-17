@@ -59,7 +59,7 @@ jobs:
 
 
       # ================================================================
-      # 3. VALIDAR SOURCE TREE
+      # 3. VALIDATE SOURCE TREE
       # ================================================================
 
       - name: Validate source tree
@@ -67,17 +67,10 @@ jobs:
         run: |
           set -euxo pipefail
 
-          test -f \
-            Feixiao/src/kext/RTW88IEEE80211.cpp
-
-          test -f \
-            Feixiao/src/kext/RTW88IEEE80211.hpp
-
-          test -f \
-            Feixiao/src/kext/RTW88PCIDevice.cpp
-
-          test -f \
-            Feixiao/src/compat/rtw88_compat.c
+          test -f Feixiao/src/kext/RTW88IEEE80211.cpp
+          test -f Feixiao/src/kext/RTW88IEEE80211.hpp
+          test -f Feixiao/src/kext/RTW88PCIDevice.cpp
+          test -f Feixiao/src/compat/rtw88_compat.c
 
           test -f \
             rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
@@ -101,11 +94,9 @@ jobs:
             "rtwdev->dm_info.fix_rate = DESC_RATE6M;" \
             "$FILE"
           then
-
             sed -i '' \
               's/rtwdev->dm_info.fix_rate = DESC_RATE6M;/rtwdev->dm_info.fix_rate = 0xFF;/' \
               "$FILE"
-
           fi
 
           grep -n \
@@ -283,8 +274,7 @@ jobs:
       # ================================================================
       # 7. WPA2 M3 DIAGNOSTICS
       #
-      # CORREÇÃO:
-      # NÃO USA PERL.
+      # CORRIGIDO PARA O AWK DO MACOS
       # ================================================================
 
       - name: Add WPA2 M3 diagnostics
@@ -298,10 +288,8 @@ jobs:
             "HP256G8 v8.5 received M3" \
             "$FILE"
           then
-
             echo "M3 diagnostic already present."
             exit 0
-
           fi
 
           cp \
@@ -312,12 +300,7 @@ jobs:
           {
               print $0
 
-              if (
-                  $0 ~ /else if[[:space:]]*\([[:space:]]*is_m3[[:space:]]*\)[[:space:]]*\{/
-                  &&
-                  inserted == 0
-              ) {
-
+              if ($0 ~ /else if[[:space:]]*\([[:space:]]*is_m3[[:space:]]*\)[[:space:]]*\{/ && inserted == 0) {
                   print ""
                   print "        IOLog("
                   print "            \"rtw88: HP256G8 v8.5 received M3\\n\""
@@ -334,7 +317,6 @@ jobs:
               }
           }
           ' "$FILE" > /tmp/RTW88IEEE80211.after-m3.cpp || {
-
               STATUS=$?
 
               if [ "$STATUS" -eq 42 ]; then
@@ -342,6 +324,10 @@ jobs:
               else
                   echo "ERROR: awk failed with status $STATUS"
               fi
+
+              cp \
+                /tmp/RTW88IEEE80211.before-m3.cpp \
+                "$FILE"
 
               exit 1
           }
@@ -357,7 +343,6 @@ jobs:
           )"
 
           if [ "$COUNT" -ne 1 ]; then
-
             echo "ERROR: expected exactly one M3 diagnostic, found $COUNT"
 
             cp \
@@ -383,7 +368,7 @@ jobs:
 
 
       # ================================================================
-      # 8. VALIDAR ROTINAS WPA2
+      # 8. VALIDATE WPA2 ROUTINES
       # ================================================================
 
       - name: Validate WPA2 PTK GTK routines
@@ -393,21 +378,10 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          grep -q \
-            "sendEAPOLKey" \
-            "$FILE"
-
-          grep -q \
-            "_ptkConf" \
-            "$FILE"
-
-          grep -q \
-            "_gtkConf" \
-            "$FILE"
-
-          grep -q \
-            "installKey" \
-            "$FILE"
+          grep -q "sendEAPOLKey" "$FILE"
+          grep -q "_ptkConf" "$FILE"
+          grep -q "_gtkConf" "$FILE"
+          grep -q "installKey" "$FILE"
 
           echo
           echo "WPA2/PTK/GTK source routines: OK"
@@ -469,7 +443,7 @@ jobs:
 
 
       # ================================================================
-      # 10. HEADER VARIABLES
+      # 10. HEADER STATE VARIABLES
       # ================================================================
 
       - name: Add v8.5 state variables
@@ -502,7 +476,6 @@ jobs:
               print
 
               if (NR == target) {
-
                   print "    bool _force40MHz = false;"
                   print ""
                   print "    volatile bool _fallbackPending = false;"
@@ -561,7 +534,6 @@ jobs:
               print
 
               if (NR == target) {
-
                   print "    void scheduleDataPathRecovery();"
                   print ""
                   print "    void runDataPathRecovery();"
@@ -598,6 +570,7 @@ jobs:
             "_dataPathRecoveryTC" \
             "$FILE"
           then
+            echo "Recovery thread member already present."
             exit 0
           fi
 
@@ -631,7 +604,7 @@ jobs:
 
 
       # ================================================================
-      # 13. VHT 80 MHZ ADAPTIVE
+      # 13. ADAPTIVE VHT 80 MHZ
       # ================================================================
 
       - name: Enable adaptive VHT 80 MHz
@@ -642,7 +615,7 @@ jobs:
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
           if grep -q \
-            "_force40MHz &&" \
+            "!_force40MHz &&" \
             "$FILE"
           then
             echo "Adaptive VHT condition already present."
@@ -687,6 +660,7 @@ jobs:
             "HP256G8 v8.5 Data-Path Recovery active" \
             "$FILE"
           then
+            echo "Runtime identification already present."
             exit 0
           fi
 
@@ -740,6 +714,7 @@ jobs:
             "HP256G8 v8.5 useful Ethernet RX" \
             "$FILE"
           then
+            echo "Useful RX counter already present."
             exit 0
           fi
 
@@ -769,13 +744,11 @@ jobs:
               print
 
               if (NR == target) {
-
                   print ""
                   print "    /*"
                   print "     * HP256G8 v8.5 useful Ethernet RX"
                   print "     *"
-                  print "     * Only actual IPv4 / ARP / IPv6 traffic"
-                  print "     * delivered through the Ethernet path."
+                  print "     * Count actual IPv4 / ARP / IPv6 data only."
                   print "     */"
                   print ""
                   print "    if ("
@@ -816,6 +789,7 @@ jobs:
             "void RTW88IEEE80211::runDataPathRecovery()" \
             "$FILE"
           then
+            echo "Data Path Recovery already present."
             exit 0
           fi
 
@@ -923,22 +897,8 @@ jobs:
               }
 
 
-              /*
-               * Clean disconnect:
-               *
-               * association
-               * PTK/GTK
-               * station
-               * TX BA
-               * RX BA/reorder
-               */
-
               doDisconnect();
 
-
-              /*
-               * Give firmware / PCI / DMA / BA state time to settle.
-               */
 
               IOSleep(
                   250
@@ -1043,12 +1003,8 @@ jobs:
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
           if grep -q \
-            "RTW88IEEE80211::dataPathRecoveryTCFn" \
-            "$FILE" \
-            &&
-            grep -q \
-              "_dataPathRecoveryTC =" \
-              "$FILE"
+            "_dataPathRecoveryTC =" \
+            "$FILE"
           then
             echo "Recovery worker allocation already present."
             exit 0
@@ -1064,7 +1020,6 @@ jobs:
 
           test -n "$LINE"
 
-          # Find end of connectTC allocation statement.
           END="$(
             tail -n +"$LINE" "$FILE" \
               | grep -n ");" \
@@ -1081,7 +1036,6 @@ jobs:
               print
 
               if (NR == target) {
-
                   print ""
                   print "    _dataPathRecoveryTC ="
                   print "        thread_call_allocate("
@@ -1127,6 +1081,7 @@ jobs:
             "thread_call_free(_dataPathRecoveryTC)" \
             "$FILE"
           then
+            echo "Recovery worker cleanup already present."
             exit 0
           fi
 
@@ -1194,6 +1149,7 @@ jobs:
             "HP256G8 v8.5 DATA PATH WATCHDOG" \
             "$FILE"
           then
+            echo "Data Path watchdog already present."
             exit 0
           fi
 
@@ -1223,15 +1179,14 @@ jobs:
               print
 
               if (NR == target) {
-
                   print ""
                   print "    /*"
                   print "     * ================================================================"
                   print "     * HP256G8 v8.5 DATA PATH WATCHDOG"
                   print "     * ================================================================"
                   print "     *"
-                  print "     * Raw 802.11 RX is not enough to prove IP/ARP is alive."
-                  print "     * We monitor useful Ethernet RX instead."
+                  print "     * Raw 802.11 RX does not prove IPv4/ARP is alive."
+                  print "     * Monitor useful Ethernet RX instead."
                   print "     */"
                   print ""
                   print "    if ("
@@ -1305,7 +1260,7 @@ jobs:
 
 
       # ================================================================
-      # 20. RESET COUNTERS AT DRIVER START
+      # 20. RESET COUNTERS
       # ================================================================
 
       - name: Reset Data Path counters on driver start
@@ -1319,6 +1274,7 @@ jobs:
             "HP256G8 v8.5 data-path counters reset" \
             "$FILE"
           then
+            echo "Counters reset code already present."
             exit 0
           fi
 
@@ -1380,7 +1336,7 @@ jobs:
 
 
       # ================================================================
-      # 21. TX THRESHOLDS
+      # 21. TX FLOW CONTROL
       # ================================================================
 
       - name: Set HP256G8 TX thresholds
@@ -1443,7 +1399,6 @@ jobs:
                   !_iface ||
                   !_enabled
               ) {
-
                   freePacket(
                       m
                   );
@@ -1455,10 +1410,8 @@ jobs:
               const size_t kMinFrame =
                   14;
 
-
               const size_t kMaxFrame =
                   4096;
-
 
               const unsigned int kMaxSegments =
                   32;
@@ -1469,20 +1422,16 @@ jobs:
                       m
                   );
 
-
               size_t firstLength =
                   mbuf_len(
                       m
                   );
 
-
               size_t chainLength =
                   0;
 
-
               unsigned int segments =
                   0;
-
 
               bool malformed =
                   false;
@@ -1498,7 +1447,6 @@ jobs:
                       mbuf_len(
                           segment
                       );
-
 
                   segments++;
 
@@ -1544,7 +1492,6 @@ jobs:
                       m
                   );
 
-
                   return;
               }
 
@@ -1573,7 +1520,6 @@ jobs:
 
 
                   if (stats) {
-
                       stats->inputPackets++;
                   }
               }
@@ -1606,7 +1552,7 @@ jobs:
 
 
       # ================================================================
-      # 23. SAFE DMA DESCRIPTOR CHECK
+      # 23. SAFE DMA
       # ================================================================
 
       - name: Apply Safe DMA descriptor recovery
@@ -1644,32 +1590,24 @@ jobs:
               struct rtw_pci *rtwpci =
                   (struct rtw_pci *)rtwdev->priv;
 
-
               const struct rtw_chip_info *chip =
                   rtwdev->chip;
 
-
               struct rtw_pci_rx_buffer_desc *buf_desc;
-
 
               u32 desc_sz =
                   chip->rx_buf_desc_sz;
 
-
               u16 expected =
                   rtwpci->rx_tag;
-
 
               u16 observed =
                   0;
 
-
               int i;
-
 
               static u32 mismatch_count =
                   0;
-
 
               static u32 recovery_count =
                   0;
@@ -1686,7 +1624,7 @@ jobs:
               /*
                * HP256G8 v8.5 SAFE RESYNC
                *
-               * 100 x 2us = 200us maximum.
+               * 100 x 2 us = 200 us maximum.
                */
 
               for (
@@ -1754,9 +1692,9 @@ jobs:
 
 
               /*
-               * CURRENT descriptor is always discarded.
+               * Current bad descriptor is always rejected.
                *
-               * Small coherent mismatch may realign only NEXT tag.
+               * Small coherent mismatch can realign NEXT tag only.
                */
 
               if (
@@ -1862,7 +1800,7 @@ jobs:
 
 
       # ================================================================
-      # 24. REJECT BAD CURRENT RX DESCRIPTOR
+      # 24. REJECT INVALID CURRENT RX DESCRIPTOR
       # ================================================================
 
       - name: Reject bad RX descriptor before parsing
@@ -1928,6 +1866,7 @@ jobs:
             "HP256G8 v8.5 invalid RX length" \
             "$FILE"
           then
+            echo "RX length validation already present."
             exit 0
           fi
 
@@ -1941,7 +1880,6 @@ jobs:
 
           test -n "$LINE"
 
-          # pkt_offset spans two lines.
           INSERT="$((LINE + 1))"
 
           awk -v target="$INSERT" '
@@ -1949,7 +1887,6 @@ jobs:
               print
 
               if (NR == target) {
-
                   print ""
                   print "\t\tif ("
                   print "\t\t    !pkt_stat.pkt_len ||"
@@ -1985,7 +1922,7 @@ jobs:
 
 
       # ================================================================
-      # 26. VALIDAR TODOS OS PATCHES
+      # 26. FINAL SOURCE VALIDATION
       # ================================================================
 
       - name: Validate all v8.5 source changes
@@ -2115,9 +2052,7 @@ jobs:
             "_rxQueued = true;" \
             "$PCI"
           then
-
             echo "ERROR: unsafe RX batching detected"
-
             exit 1
           fi
 
@@ -2137,8 +2072,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          cd \
-            Feixiao/firmware
+          cd Feixiao/firmware
 
           for fw in \
             rtw8822b_fw.bin \
@@ -2186,16 +2120,14 @@ jobs:
           echo "XCODE"
           echo "================================================"
 
-          xcodebuild \
-            -version
+          xcodebuild -version
 
           echo
           echo "================================================"
           echo "CLANG"
           echo "================================================"
 
-          clang \
-            --version
+          clang --version
 
 
       # ================================================================
@@ -2220,7 +2152,7 @@ jobs:
 
 
       # ================================================================
-      # 30. VERIFY BUILD OUTPUT
+      # 30. VERIFY BINARY
       # ================================================================
 
       - name: Verify HP256G8 v8.5 binary
@@ -2241,8 +2173,7 @@ jobs:
           echo "KEXT"
           echo "================================================"
 
-          file \
-            "$BIN"
+          file "$BIN"
 
           echo
           echo "================================================"
@@ -2332,105 +2263,45 @@ jobs:
           FEIXIAO V8.5 DATA-PATH RECOVERY
           ============================================================
 
-
           CHIP
           ============================================================
 
           RTL8821CE
-
-          PCI:
-          10EC:C821
+          PCI 10EC:C821
 
 
-          MACOS TARGET
+          MAIN OBJECTIVE
           ============================================================
 
-          macOS Tahoe
+          Detect and recover:
 
-          HP 256 G8
+          Wi-Fi State = connected
+          RSSI = valid
 
-
-          PRIMARY V8.5 OBJECTIVE
-          ============================================================
-
-          Fix false-connected condition:
-
-          State:
-          connected
-
-          RSSI:
-          valid
-
-          Channel:
-          associated
-
-          BUT:
+          but:
 
           ARP = dead
-
           IPv4 = dead
-
           gateway = unreachable
 
 
           USEFUL RX
           ============================================================
 
-          Raw Wi-Fi RX does NOT prove the IP data path is alive.
+          Useful traffic:
 
-          v8.5 uses useful Ethernet RX:
+          IPv4
+          ARP
+          IPv6
 
-          IPv4:
-          0x0800
-
-          ARP:
-          0x0806
-
-          IPv6:
-          0x86DD
-
-
-          RAW WIFI FRAMES
-          ============================================================
-
-          Management frames do not count as useful data-path RX.
-
-          Examples:
-
-          beacon
-
-          authentication management
-
-          association management
-
-          ADDBA management
-
-          BlockAck control
+          Raw management Wi-Fi RX is not considered
+          proof that the network data path is alive.
 
 
           WATCHDOG
           ============================================================
 
-          While connected:
-
-          TX continues
-                 |
-                 v
-          useful Ethernet RX monitored
-                 |
-                 v
-          128 TX without useful RX
-                 |
-                 v
-          DATA PATH STALL
-
-
-          RSSI WATCHDOG
-          ============================================================
-
-          RSSI >= 0
-
-          also triggers:
+          128 TX operations without useful Ethernet RX:
 
           DATA PATH STALL
 
@@ -2441,33 +2312,19 @@ jobs:
           DATA PATH STALL
                  |
                  v
-          schedule recovery
+          recovery worker
                  |
                  v
-          recovery thread
+          doDisconnect
                  |
                  v
-          doDisconnect()
-                 |
-                 v
-          association teardown
-                 |
-                 +--> STA cleanup
-                 |
-                 +--> PTK / GTK cleanup
-                 |
-                 +--> TX BA cleanup
-                 |
-                 +--> RX BA / reorder cleanup
+          association / BA / key cleanup
                  |
                  v
           wait 250 ms
                  |
                  v
-          reset health counters
-                 |
-                 v
-          normal Feixiao authentication
+          reconnect
                  |
                  v
           WPA2
@@ -2476,122 +2333,65 @@ jobs:
           A-MPDU
 
 
-          80 MHZ
+          VHT 80 MHZ
           ============================================================
 
-          VHT 80 MHz remains the initial performance attempt.
+          80 MHz remains enabled initially.
 
-          If a data-path failure occurs at 80 MHz:
-
-          Safe 40 MHz mode is armed.
-
-
-          SAFE 40 MHZ
-          ============================================================
-
-          Once an 80 MHz failure occurs:
-
-          force40MHz = true
-
-          subsequent recovery avoids unstable 80 MHz.
+          Failure at 80 MHz arms Safe 40 MHz.
 
 
           WPA2
           ============================================================
 
-          M4 Key Length:
-          0
+          M4 Key Length = 0
 
-          M4 Nonce:
-          zero
+          M4 nonce = zero
 
-          M3 diagnostic:
-          enabled
+          M3 diagnostics enabled
 
-          A-MPDU settle:
-          100 ms
+          WPA2/A-MPDU settle = 100 ms
 
 
-          RATE CONTROL
+          TX
           ============================================================
 
-          Firmware automatic rate selection:
+          Automatic firmware rate control enabled.
 
-          enabled
+          TX stall = 96
 
-
-          TX FLOW CONTROL
-          ============================================================
-
-          TX stall threshold:
-
-          96
-
-          TX resume threshold:
-
-          160
+          TX resume = 160
 
 
           SAFE MBUF
           ============================================================
 
-          Minimum frame:
+          min frame = 14
 
-          14 bytes
+          max frame = 4096
 
-          Maximum:
-
-          4096 bytes
-
-          Maximum mbuf segments:
-
-          32
-
-          mbuf packet-header length must match
-          the real chain length.
+          max mbuf segments = 32
 
 
           SAFE DMA
           ============================================================
 
-          Maximum RX descriptor wait:
+          maximum descriptor wait = 200 us
 
-          200 us
+          bad current descriptor = rejected
 
-          Current mismatched descriptor:
-
-          ALWAYS REJECTED
+          bounded NEXT-tag resync = 1..32
 
 
-          RX TAG RESYNC
+          RX
           ============================================================
 
-          bounded delta:
+          DMA pkt_len validation enabled
 
-          1..32
-
-          resync applies only to NEXT descriptor.
+          unsafe RX batching disabled
 
 
-          RX LENGTH
-          ============================================================
-
-          pkt_len must fit inside:
-
-          RTK_PCI_RX_BUF_SIZE
-
-          after descriptor and driver-info offset.
-
-
-          RX BATCHING
-          ============================================================
-
-          Experimental RX batching:
-
-          DISABLED
-
-
-          PERFORMANCE
+          PERFORMANCE TARGET
           ============================================================
 
           Target:
@@ -2600,28 +2400,24 @@ jobs:
 
           >100 Mbps upload
 
-          80 MHz is required for best chance of reaching
-          this throughput on RTL8821CE.
-
-          This is a development target.
-
-          It is NOT a throughput guarantee.
+          This is a development target and not a
+          guaranteed throughput result.
 
 
           IMPORTANT
           ============================================================
 
-          Keep v8.2 as known-stable backup.
+          Keep the known working build as backup.
 
-          Always install:
+          Always use:
 
           rtw88.kext
 
-          AND
+          and
 
           rtw88ctl
 
-          from the SAME artifact.
+          from this SAME build.
           EOF
 
           cd \
@@ -2634,7 +2430,7 @@ jobs:
 
 
       # ================================================================
-      # 32. UPLOAD ARTIFACT
+      # 32. UPLOAD
       # ================================================================
 
       - name: Upload HP256G8 v8.5 artifact
