@@ -1,4 +1,4 @@
-name: Build HP256G8 RTL8821CE v8.5.1 Syntax Safe
+name: Build HP256G8 RTL8821CE v8.5.2 Clean Fixed
 
 "on":
   workflow_dispatch:
@@ -6,2165 +6,892 @@ name: Build HP256G8 RTL8821CE v8.5.1 Syntax Safe
 permissions:
   contents: read
 
+env:
+  FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+  RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+  BUILD_NAME: Feixiao-HP256G8-v8.5.2-Clean-Fixed
+
 jobs:
+
   build:
-    name: Build HP256G8 v8.5.1
+
+    name: Build HP256G8 v8.5.2
     runs-on: macos-latest
+    timeout-minutes: 30
 
     steps:
 
       # ================================================================
-      # 01 - CHECKOUT FEIXIAO
+      # 01
+      # CHECKOUT FEIXIAO + MACKERNELSDK
       # ================================================================
 
-      - name: Checkout Feixiao
+      - name: Checkout Feixiao with MacKernelSDK
         uses: actions/checkout@v4
         with:
           repository: thegwchr/Feixiao
-          ref: e963f43188382eced4ef2fa75d19ce4db2315c68
-          submodules: recursive
+          ref: ${{ env.FEIXIAO_REF }}
           path: Feixiao
-          fetch-depth: 0
+          fetch-depth: 1
+          submodules: recursive
 
 
       # ================================================================
-      # 02 - CLONE RTW88-STABLE
+      # 02
+      # VERIFY MACKERNELSDK
+      # ================================================================
+
+      - name: Validate MacKernelSDK submodule
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "MACKERNELSDK"
+          echo "============================================================"
+          echo
+
+          if [ ! -d "Feixiao/MacKernelSDK" ]; then
+            echo "ERROR: MacKernelSDK directory missing"
+            exit 1
+          fi
+
+          if [ ! -d "Feixiao/MacKernelSDK/Headers" ]; then
+            echo "ERROR: MacKernelSDK Headers missing"
+            exit 1
+          fi
+
+          SDK_COMMIT="$(
+            git -C Feixiao/MacKernelSDK rev-parse HEAD
+          )"
+
+          echo "MacKernelSDK commit:"
+          echo "${SDK_COMMIT}"
+
+          echo
+          echo "MacKernelSDK: OK"
+
+
+      # ================================================================
+      # 03
+      # CLONE RTW88-STABLE
       # ================================================================
 
       - name: Clone matching rtw88-stable
         shell: bash
         run: |
-          set -eux
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "RTW88-STABLE"
+          echo "============================================================"
+          echo
 
           git clone \
             https://github.com/thegwchr/rtw88-stable.git \
             rtw88-stable
 
-          git -C rtw88-stable checkout \
-            d029a677c49266fad86750714eb5612becd134d3
+          git \
+            -C rtw88-stable \
+            checkout \
+            "${RTW88_REF}"
 
           echo
-          echo "================================================"
-          echo "FEIXIAO COMMIT"
-          echo "================================================"
+          echo "rtw88-stable commit:"
 
-          git -C Feixiao rev-parse HEAD
-
-          echo
-          echo "================================================"
-          echo "RTW88-STABLE COMMIT"
-          echo "================================================"
-
-          git -C rtw88-stable rev-parse HEAD
+          git \
+            -C rtw88-stable \
+            rev-parse \
+            HEAD
 
 
       # ================================================================
-      # 03 - VALIDATE SOURCE TREE
+      # 04
+      # VALIDATE SOURCE REVISIONS
+      # ================================================================
+
+      - name: Validate exact source revisions
+        shell: bash
+        run: |
+          set -eu
+
+          FEIXIAO_ACTUAL="$(
+            git -C Feixiao rev-parse HEAD
+          )"
+
+          RTW88_ACTUAL="$(
+            git -C rtw88-stable rev-parse HEAD
+          )"
+
+          echo
+          echo "============================================================"
+          echo "SOURCE REVISIONS"
+          echo "============================================================"
+          echo
+
+          echo "Feixiao expected:"
+          echo "${FEIXIAO_REF}"
+
+          echo
+
+          echo "Feixiao actual:"
+          echo "${FEIXIAO_ACTUAL}"
+
+          echo
+
+          echo "rtw88-stable expected:"
+          echo "${RTW88_REF}"
+
+          echo
+
+          echo "rtw88-stable actual:"
+          echo "${RTW88_ACTUAL}"
+
+          if [ "${FEIXIAO_ACTUAL}" != "${FEIXIAO_REF}" ]; then
+
+            echo
+            echo "ERROR: Feixiao revision mismatch"
+
+            exit 1
+          fi
+
+          if [ "${RTW88_ACTUAL}" != "${RTW88_REF}" ]; then
+
+            echo
+            echo "ERROR: rtw88-stable revision mismatch"
+
+            exit 1
+          fi
+
+          echo
+          echo "Source revisions: OK"
+
+
+      # ================================================================
+      # 05
+      # VALIDATE SOURCE TREE
       # ================================================================
 
       - name: Validate source tree
         shell: bash
         run: |
-          set -eux
+          set -eu
 
-          test -f Feixiao/src/kext/RTW88IEEE80211.cpp
-          test -f Feixiao/src/kext/RTW88IEEE80211.hpp
-          test -f Feixiao/src/kext/RTW88PCIDevice.cpp
-          test -f Feixiao/src/compat/rtw88_compat.c
+          echo
+          echo "============================================================"
+          echo "SOURCE TREE"
+          echo "============================================================"
+          echo
 
-          test -f \
-            rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          REQUIRED_FILES="
+          Feixiao/Makefile
+          Feixiao/src/kext/RTW88IEEE80211.cpp
+          Feixiao/src/kext/RTW88IEEE80211.hpp
+          Feixiao/src/kext/RTW88PCIDevice.cpp
+          Feixiao/src/kext/RTW88PCIDevice.hpp
+          Feixiao/src/kext/RTW88UserClient.cpp
+          Feixiao/src/kext/RTW88UserClient.hpp
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          "
+
+          for FILE in ${REQUIRED_FILES}
+          do
+
+            if [ ! -f "${FILE}" ]; then
+
+              echo "ERROR: missing file:"
+              echo "${FILE}"
+
+              exit 1
+            fi
+
+            echo "[OK] ${FILE}"
+
+          done
 
           echo
           echo "Source tree: OK"
 
 
       # ================================================================
-      # 04 - AUTOMATIC RATE CONTROL
+      # 06
+      # VALIDATE RTL8821CE
       # ================================================================
 
-      - name: Enable automatic firmware rate control
+      - name: Validate RTL8821CE support
         shell: bash
         run: |
-          set -eux
-
-          FILE="Feixiao/src/compat/rtw88_compat.c"
-
-          sed -i '' \
-            's/rtwdev->dm_info.fix_rate = DESC_RATE6M;/rtwdev->dm_info.fix_rate = 0xFF;/' \
-            "$FILE"
-
-          grep -n \
-            "fix_rate = 0xFF" \
-            "$FILE"
-
-          echo
-          echo "Automatic firmware rate control: OK"
-
-
-      # ================================================================
-      # 05 - WPA2 M3 / M4
-      # ================================================================
-
-      - name: Apply WPA2 M3 M4 fixes
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
-          cp \
-            "$FILE" \
-            /tmp/RTW88IEEE80211.wpa2.original.cpp
-
-
-          # ------------------------------------------------------------
-          # PASS 1:
-          #
-          # M4 Key Length
-          # M4 Nonce
-          # M3 diagnostics
-          # ------------------------------------------------------------
-
-          awk '
-          BEGIN {
-              m4len = 0
-              m4nonce = 0
-              m3diag = 0
-          }
-
-          {
-              if (index($0, "key[3] = 0; key[4] = 16;") > 0 && m4len == 0) {
-
-                  print "    if (step == 4) {"
-                  print "        key[3] = 0;"
-                  print "        key[4] = 0;"
-                  print ""
-                  print "        IOLog("
-                  print "            \"rtw88: HP256G8 v8.5.1 M4 key_length=0\\n\""
-                  print "        );"
-                  print ""
-                  print "    } else {"
-                  print "        key[3] = 0;"
-                  print "        key[4] = 16;"
-                  print "    }"
-
-                  m4len = 1
-                  next
-              }
-
-
-              if (index($0, "memcpy(key + 13, _snonce, 32);") > 0 && m4nonce == 0) {
-
-                  print "    if (step == 4) {"
-                  print "        memset(key + 13, 0, 32);"
-                  print ""
-                  print "        IOLog("
-                  print "            \"rtw88: HP256G8 v8.5.1 M4 nonce zeroed\\n\""
-                  print "        );"
-                  print ""
-                  print "    } else {"
-                  print "        memcpy(key + 13, _snonce, 32);"
-                  print "    }"
-
-                  m4nonce = 1
-                  next
-              }
-
-
-              print $0
-
-
-              if (index($0, "else if (is_m3) {") > 0 && m3diag == 0) {
-
-                  print ""
-                  print "        IOLog("
-                  print "            \"rtw88: HP256G8 v8.5.1 received M3\\n\""
-                  print "        );"
-                  print ""
-
-                  m3diag = 1
-              }
-          }
-
-          END {
-              if (m4len != 1)
-                  exit 41
-
-              if (m4nonce != 1)
-                  exit 42
-
-              if (m3diag != 1)
-                  exit 43
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.wpa2.pass1.cpp
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: WPA2 structural patch failed"
-            exit 1
-          fi
-
-          mv \
-            /tmp/RTW88IEEE80211.wpa2.pass1.cpp \
-            "$FILE"
-
-
-          # ------------------------------------------------------------
-          # PASS 2:
-          #
-          # Delay before A-MPDU
-          # ------------------------------------------------------------
-
-          awk '
-          BEGIN {
-              done = 0
-          }
-
-          {
-              if (index($0, "startTxAggregation();") > 0 &&
-                  index($0, "keys are installed") > 0 &&
-                  done == 0) {
-
-                  print "        IOSleep(100);"
-                  print ""
-                  print "        IOLog("
-                  print "            \"rtw88: HP256G8 v8.5.1 WPA2 settle complete, starting A-MPDU\\n\""
-                  print "        );"
-                  print ""
-                  print "        startTxAggregation();"
-
-                  done = 1
-                  next
-              }
-
-              print $0
-          }
-
-          END {
-              if (done != 1)
-                  exit 44
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.wpa2.final.cpp
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: A-MPDU settle patch failed"
-            exit 1
-          fi
-
-          mv \
-            /tmp/RTW88IEEE80211.wpa2.final.cpp \
-            "$FILE"
-
-
-          # ------------------------------------------------------------
-          # VALIDATE
-          # ------------------------------------------------------------
-
-          grep -q \
-            "HP256G8 v8.5.1 M4 key_length=0" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 M4 nonce zeroed" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 received M3" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 WPA2 settle complete" \
-            "$FILE"
-
-          grep -q "sendEAPOLKey" "$FILE"
-          grep -q "_ptkConf" "$FILE"
-          grep -q "_gtkConf" "$FILE"
-          grep -q "installKey" "$FILE"
-
-          echo
-          echo "================================================"
-          echo "WPA2 PATCH: OK"
-          echo "================================================"
-
-
-      # ================================================================
-      # 06 - HEADER STATE / METHODS
-      # ================================================================
-
-      - name: Add v8.5.1 header declarations
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88IEEE80211.hpp"
-
-          cp \
-            "$FILE" \
-            /tmp/RTW88IEEE80211.hpp.original
-
-
-          awk '
-          BEGIN {
-              methods = 0
-              threadmember = 0
-              state = 0
-          }
-
-          {
-              print $0
-
-
-              if (index($0, "void      setConnectedChandef(struct ieee80211_channel *chan);") > 0 &&
-                  methods == 0) {
-
-                  print "    void      scheduleDataPathRecovery();"
-                  print "    void      runDataPathRecovery();"
-                  print ""
-                  print "    static void dataPathRecoveryTCFn("
-                  print "        thread_call_param_t self,"
-                  print "        thread_call_param_t"
-                  print "    );"
-
-                  methods = 1
-              }
-
-
-              if (index($0, "thread_call_t _connectTC = nullptr;") > 0 &&
-                  threadmember == 0) {
-
-                  print ""
-                  print "    thread_call_t _dataPathRecoveryTC = nullptr;"
-
-                  threadmember = 1
-              }
-
-
-              if (index($0, "uint8_t  _connChanWidth = 20;") > 0 &&
-                  state == 0) {
-
-                  print ""
-                  print "    /* HP256G8 v8.5.1 Data Path Recovery */"
-                  print ""
-                  print "    bool _force40MHz = false;"
-                  print ""
-                  print "    volatile bool _fallbackPending = false;"
-                  print ""
-                  print "    uint32_t _perfLastRxFrameCount = 0;"
-                  print ""
-                  print "    uint32_t _perfTxWithoutRx = 0;"
-                  print ""
-                  print "    volatile uint32_t _usefulRxCount = 0;"
-                  print ""
-                  print "    uint32_t _dataPathRecoveryCount = 0;"
-
-                  state = 1
-              }
-          }
-
-          END {
-              if (methods != 1)
-                  exit 51
-
-              if (threadmember != 1)
-                  exit 52
-
-              if (state != 1)
-                  exit 53
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.hpp.v851
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: header patch failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/RTW88IEEE80211.hpp.v851 \
-            "$FILE"
-
-
-          grep -q \
-            "scheduleDataPathRecovery" \
-            "$FILE"
-
-          grep -q \
-            "runDataPathRecovery" \
-            "$FILE"
-
-          grep -q \
-            "_dataPathRecoveryTC" \
-            "$FILE"
-
-          grep -q \
-            "_force40MHz" \
-            "$FILE"
-
-          grep -q \
-            "_fallbackPending" \
-            "$FILE"
-
-          grep -q \
-            "_perfLastRxFrameCount" \
-            "$FILE"
-
-          grep -q \
-            "_perfTxWithoutRx" \
-            "$FILE"
-
-          grep -q \
-            "_usefulRxCount" \
-            "$FILE"
-
-          grep -q \
-            "_dataPathRecoveryCount" \
-            "$FILE"
-
-          echo
-          echo "Header v8.5.1: OK"
-
-
-      # ================================================================
-      # 07 - ADAPTIVE VHT 80 MHZ
-      # ================================================================
-
-      - name: Enable adaptive VHT 80 MHz
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
-          cp \
-            "$FILE" \
-            /tmp/RTW88IEEE80211.vht.original.cpp
-
-
-          awk '
-          BEGIN {
-              condition = 0
-              marker = 0
-          }
-
-          {
-              if (index($0, "if (chip80 && vhtWidth == 1 && vhtSeg0 != 0) {") > 0 &&
-                  condition == 0) {
-
-                  print "    if (!_force40MHz && chip80 && vhtWidth == 1 && vhtSeg0 != 0) {"
-
-                  condition = 1
-                  next
-              }
-
-
-              if (index($0, "IOLog(\"rtw88: connected chandef:") > 0 &&
-                  marker == 0) {
-
-                  print "    IOLog("
-                  print "        \"rtw88: HP256G8 v8.5.1 Data-Path Recovery active \""
-                  print "        \"safe40=%u usefulRx=%u\\n\","
-                  print "        _force40MHz ? 1 : 0,"
-                  print "        _usefulRxCount"
-                  print "    );"
-                  print ""
-
-                  marker = 1
-              }
-
-
-              print $0
-          }
-
-          END {
-              if (condition != 1)
-                  exit 61
-
-              if (marker != 1)
-                  exit 62
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.vht.v851.cpp
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: adaptive VHT patch failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/RTW88IEEE80211.vht.v851.cpp \
-            "$FILE"
-
-
-          grep -q \
-            "if (!_force40MHz && chip80 && vhtWidth == 1 && vhtSeg0 != 0)" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 Data-Path Recovery active" \
-            "$FILE"
-
-
-          echo
-          echo "================================================"
-          echo "ADAPTIVE VHT: OK"
-          echo "================================================"
-
-
-      # ================================================================
-      # 08 - USEFUL ETHERNET RX COUNTER
-      # ================================================================
-
-      - name: Add useful Ethernet RX counter
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
-
-          awk '
-          BEGIN {
-              done = 0
-          }
-
-          {
-              print $0
-
-
-              if (index($0, "_parent->injectRxFrame(m);") > 0 &&
-                  done == 0) {
-
-                  print ""
-                  print "    /* HP256G8 v8.5.1 useful Ethernet RX */"
-                  print ""
-                  print "    if (ethertype == 0x0800 ||"
-                  print "        ethertype == 0x0806 ||"
-                  print "        ethertype == 0x86DD) {"
-                  print ""
-                  print "        _usefulRxCount++;"
-                  print "    }"
-
-                  done = 1
-              }
-          }
-
-          END {
-              if (done != 1)
-                  exit 71
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.usefulrx.v851.cpp
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: useful RX patch failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/RTW88IEEE80211.usefulrx.v851.cpp \
-            "$FILE"
-
-
-          grep -q \
-            "HP256G8 v8.5.1 useful Ethernet RX" \
-            "$FILE"
-
-          echo
-          echo "Useful Ethernet RX counter: OK"
-
-
-      # ================================================================
-      # 09 - DATA PATH RECOVERY FUNCTIONS
-      # ================================================================
-
-      - name: Add Data Path Recovery functions
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
-
-          cat > /tmp/v851_recovery.cpp <<'CPP'
-
-          /* ================================================================== */
-          /* HP256G8 v8.5.1 Data Path Recovery                                  */
-          /* ================================================================== */
-
-          void RTW88IEEE80211::dataPathRecoveryTCFn(
-              thread_call_param_t self,
-              thread_call_param_t)
-          {
-              RTW88IEEE80211 *obj =
-                  (RTW88IEEE80211 *)self;
-
-              if (!obj)
-                  return;
-
-              obj->runDataPathRecovery();
-          }
-
-
-          void RTW88IEEE80211::scheduleDataPathRecovery()
-          {
-              if (_fallbackPending)
-                  return;
-
-              if (_state != RTW88_STATE_CONNECTED)
-                  return;
-
-              if (!_dataPathRecoveryTC)
-                  return;
-
-
-              _fallbackPending =
-                  true;
-
-
-              IOLog(
-                  "rtw88: HP256G8 v8.5.1 scheduling DATA PATH recovery "
-                  "width=%u rssi=%d txNoUsefulRx=%u usefulRx=%u rawRx=%u\n",
-                  _connChanWidth,
-                  _rssi,
-                  _perfTxWithoutRx,
-                  _usefulRxCount,
-                  _rxFrameCount
-              );
-
-
-              thread_call_enter(
-                  _dataPathRecoveryTC
-              );
-          }
-
-
-          void RTW88IEEE80211::runDataPathRecovery()
-          {
-              if (
-                  _state != RTW88_STATE_CONNECTED ||
-                  !_powered ||
-                  !_hw ||
-                  !_vif
-              ) {
-
-                  _fallbackPending =
-                      false;
-
-                  return;
-              }
-
-
-              uint8_t failedWidth =
-                  _connChanWidth;
-
-
-              _dataPathRecoveryCount++;
-
-
-              IOLog(
-                  "rtw88: HP256G8 v8.5.1 DATA PATH RECOVERY BEGIN "
-                  "attempt=%u width=%u rssi=%d usefulRx=%u rawRx=%u\n",
-                  _dataPathRecoveryCount,
-                  failedWidth,
-                  _rssi,
-                  _usefulRxCount,
-                  _rxFrameCount
-              );
-
-
-              /*
-               * If the data path failed at 80 MHz,
-               * do not immediately return to 80 MHz.
-               */
-
-              if (failedWidth == 80) {
-
-                  _force40MHz =
-                      true;
-
-
-                  IOLog(
-                      "rtw88: HP256G8 v8.5.1 "
-                      "80 MHz marked unstable; Safe 40 MHz armed\n"
-                  );
-              }
-
-
-              /*
-               * Normal disconnect performs:
-               *
-               * key cleanup
-               * STA cleanup
-               * TX BA cleanup
-               * RX BA reorder cleanup
-               */
-
-              doDisconnect();
-
-
-              /*
-               * Give firmware / PCI / DMA some time
-               * before starting another association.
-               */
-
-              IOSleep(
-                  250
-              );
-
-
-              if (
-                  !_powered ||
-                  !_hw ||
-                  !_vif
-              ) {
-
-                  _fallbackPending =
-                      false;
-
-                  return;
-              }
-
-
-              _perfTxWithoutRx =
-                  0;
-
-
-              _perfLastRxFrameCount =
-                  _usefulRxCount;
-
-
-              _fallbackPending =
-                  false;
-
-
-              _state =
-                  RTW88_STATE_AUTHENTICATING;
-
-
-              IOLog(
-                  "rtw88: HP256G8 v8.5.1 reconnecting after "
-                  "DATA PATH recovery safe40=%u\n",
-                  _force40MHz ? 1 : 0
-              );
-
-
-              if (_connectTC) {
-
-                  thread_call_enter(
-                      _connectTC
-                  );
-
-              } else {
-
-                  doAuthenticate();
-              }
-          }
-
-
-          CPP
-
-
-          awk '
-          BEGIN {
-              inserted = 0
-          }
-
-          {
-              if (index($0, "TX path: Ethernet") > 0 &&
-                  inserted == 0) {
-
-                  while ((getline line < "/tmp/v851_recovery.cpp") > 0)
-                      print line
-
-                  close("/tmp/v851_recovery.cpp")
-
-                  inserted = 1
-              }
-
-              print $0
-          }
-
-          END {
-              if (inserted != 1)
-                  exit 81
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.recovery.v851.cpp
-
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: recovery-function insertion failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/RTW88IEEE80211.recovery.v851.cpp \
-            "$FILE"
-
-
-          grep -q \
-            "HP256G8 v8.5.1 scheduling DATA PATH recovery" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 DATA PATH RECOVERY BEGIN" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 reconnecting after DATA PATH recovery" \
-            "$FILE"
-
-
-          echo
-          echo "Data Path Recovery functions: OK"
-
-
-      # ================================================================
-      # 10 - WORKER LIFECYCLE
-      #
-      # THIS IS THE STEP THAT FAILED BEFORE.
-      #
-      # NO MULTILINE AWK IF.
-      # NO COMPLEX REGEX.
-      # NO PIPELINE.
-      # ================================================================
-
-      - name: Add Data Path Recovery worker lifecycle
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
-          cp \
-            "$FILE" \
-            /tmp/RTW88IEEE80211.worker.original.cpp
-
-
-          # ------------------------------------------------------------
-          # ALLOCATION
-          # ------------------------------------------------------------
-
-          awk '
-          BEGIN {
-              waiting = 0
-              allocated = 0
-          }
-
-          {
-              print $0
-
-
-              if (index($0, "_connectTC = thread_call_allocate") > 0 && allocated == 0) {
-                  waiting = 1
-                  next
-              }
-
-
-              if (waiting == 1 && index($0, "(thread_call_param_t)this);") > 0) {
-
-                  print ""
-                  print "    _dataPathRecoveryTC = thread_call_allocate("
-                  print "        (thread_call_func_t)RTW88IEEE80211::dataPathRecoveryTCFn,"
-                  print "        (thread_call_param_t)this"
-                  print "    );"
-                  print ""
-                  print "    if (!_dataPathRecoveryTC)"
-                  print "        return false;"
-                  print ""
-
-                  waiting = 0
-                  allocated = 1
-              }
-          }
-
-          END {
-              if (allocated != 1)
-                  exit 91
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.worker.alloc.cpp
-
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: recovery-worker allocation insertion failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/RTW88IEEE80211.worker.alloc.cpp \
-            "$FILE"
-
-
-          # ------------------------------------------------------------
-          # CLEANUP
-          # ------------------------------------------------------------
-
-          awk '
-          BEGIN {
-              freed = 0
-          }
-
-          {
-              if (index($0, "if (_connectTC) { thread_call_cancel(_connectTC); thread_call_free(_connectTC); _connectTC = nullptr; }") > 0 && freed == 0) {
-
-                  print "    if (_dataPathRecoveryTC) {"
-                  print "        thread_call_cancel(_dataPathRecoveryTC);"
-                  print "        thread_call_free(_dataPathRecoveryTC);"
-                  print "        _dataPathRecoveryTC = nullptr;"
-                  print "    }"
-                  print ""
-                  print $0
-
-                  freed = 1
-                  next
-              }
-
-              print $0
-          }
-
-          END {
-              if (freed != 1)
-                  exit 92
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.worker.final.cpp
-
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: recovery-worker cleanup insertion failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/RTW88IEEE80211.worker.final.cpp \
-            "$FILE"
-
-
-          # ------------------------------------------------------------
-          # VALIDATION
-          # ------------------------------------------------------------
-
-          grep -q \
-            "_dataPathRecoveryTC = thread_call_allocate" \
-            "$FILE"
-
-          grep -q \
-            "thread_call_cancel(_dataPathRecoveryTC)" \
-            "$FILE"
-
-          grep -q \
-            "thread_call_free(_dataPathRecoveryTC)" \
-            "$FILE"
-
-
-          echo
-          echo "================================================"
-          echo "RECOVERY WORKER LIFECYCLE: OK"
-          echo "================================================"
-
-
-      # ================================================================
-      # 11 - DATA PATH WATCHDOG
-      # ================================================================
-
-      - name: Install useful RX Data Path watchdog
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
-
-          cat > /tmp/v851_watchdog.cpp <<'CPP'
-
-              /*
-               * ==============================================================
-               * HP256G8 v8.5.1 DATA PATH WATCHDOG
-               * ==============================================================
-               *
-               * _rxFrameCount includes raw 802.11 frames.
-               *
-               * _usefulRxCount only counts Ethernet packets
-               * delivered to macOS.
-               */
-
-              if (_state == RTW88_STATE_CONNECTED && !_fallbackPending) {
-
-                  uint32_t currentUsefulRx =
-                      _usefulRxCount;
-
-
-                  if (currentUsefulRx != _perfLastRxFrameCount) {
-
-                      _perfLastRxFrameCount =
-                          currentUsefulRx;
-
-                      _perfTxWithoutRx =
-                          0;
-
-                  } else {
-
-                      if (_perfTxWithoutRx < 0xfffffff0U)
-                          _perfTxWithoutRx++;
-                  }
-
-
-                  bool invalidRssi =
-                      (_rssi >= 0);
-
-
-                  bool usefulRxStalled =
-                      (_perfTxWithoutRx >= 128);
-
-
-                  if (invalidRssi || usefulRxStalled) {
-
-                      IOLog(
-                          "rtw88: HP256G8 v8.5.1 DATA PATH STALL "
-                          "width=%u rssi=%d "
-                          "txNoUsefulRx=%u usefulRx=%u rawRx=%u\n",
-                          _connChanWidth,
-                          _rssi,
-                          _perfTxWithoutRx,
-                          _usefulRxCount,
-                          _rxFrameCount
-                      );
-
-
-                      scheduleDataPathRecovery();
-                  }
-              }
-
-
-          CPP
-
-
-          awk '
-          BEGIN {
-              waiting = 0
-              inserted = 0
-          }
-
-          {
-              print $0
-
-
-              if (index($0, "UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)") > 0) {
-                  waiting = 1
-                  next
-              }
-
-
-              if (waiting == 1 && $0 == "{") {
-
-                  while ((getline line < "/tmp/v851_watchdog.cpp") > 0)
-                      print line
-
-                  close("/tmp/v851_watchdog.cpp")
-
-                  waiting = 0
-                  inserted = 1
-              }
-          }
-
-          END {
-              if (inserted != 1)
-                  exit 101
-          }
-          ' "$FILE" > /tmp/RTW88IEEE80211.watchdog.v851.cpp
-
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: watchdog insertion failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/RTW88IEEE80211.watchdog.v851.cpp \
-            "$FILE"
-
-
-          grep -q \
-            "HP256G8 v8.5.1 DATA PATH WATCHDOG" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 DATA PATH STALL" \
-            "$FILE"
-
-
-          echo
-          echo "Data Path watchdog: OK"
-
-
-      # ================================================================
-      # 12 - TX FLOW CONTROL
-      # ================================================================
-
-      - name: Set HP256G8 TX thresholds
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
-
-
-          sed -i '' \
-            's/kRTW88TxStallAvail = 128/kRTW88TxStallAvail = 96/g' \
-            "$FILE"
-
-
-          sed -i '' \
-            's/kRTW88TxResumeAvail = 192/kRTW88TxResumeAvail = 160/g' \
-            "$FILE"
-
-
-          grep -nE \
-            "kRTW88TxStallAvail|kRTW88TxResumeAvail" \
-            "$FILE"
-
-
-          echo
-          echo "TX thresholds: OK"
-
-
-      # ================================================================
-      # 13 - SAFE MACOS MBUF
-      # ================================================================
-
-      - name: Apply Safe macOS mbuf validation
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
-
-
-          START="$(
-            awk '
-            index($0, "void RTW88PCIDevice::injectRxFrame(mbuf_t m)") > 0 {
-                print NR
-                exit
-            }
-            ' "$FILE"
-          )"
-
-
-          END="$(
-            awk '
-            index($0, "DMA coherent allocation") > 0 {
-                print NR
-                exit
-            }
-            ' "$FILE"
-          )"
-
-
-          test -n "$START"
-          test -n "$END"
-
-
-          if [ "$END" -le "$START" ]; then
-            echo "ERROR: invalid injectRxFrame boundaries"
-            exit 1
-          fi
-
-
-          cat > /tmp/v851_safe_mbuf.cpp <<'CPP'
-
-          void RTW88PCIDevice::injectRxFrame(mbuf_t m)
-          {
-              drainPendingFree();
-
-
-              if (!_iface || !_enabled) {
-
-                  freePacket(m);
-                  return;
-              }
-
-
-              const size_t kMinFrame =
-                  14;
-
-
-              const size_t kMaxFrame =
-                  4096;
-
-
-              const unsigned int kMaxSegments =
-                  32;
-
-
-              size_t packetLength =
-                  mbuf_pkthdr_len(m);
-
-
-              size_t firstLength =
-                  mbuf_len(m);
-
-
-              size_t chainLength =
-                  0;
-
-
-              unsigned int segments =
-                  0;
-
-
-              bool malformed =
-                  false;
-
-
-              for (
-                  mbuf_t segment = m;
-                  segment != nullptr;
-                  segment = mbuf_next(segment)
-              ) {
-
-                  size_t length =
-                      mbuf_len(segment);
-
-
-                  segments++;
-
-
-                  if (
-                      segments > kMaxSegments ||
-                      length > kMaxFrame ||
-                      chainLength > kMaxFrame - length
-                  ) {
-
-                      malformed =
-                          true;
-
-                      break;
-                  }
-
-
-                  chainLength +=
-                      length;
-              }
-
-
-              if (
-                  malformed ||
-                  packetLength < kMinFrame ||
-                  packetLength > kMaxFrame ||
-                  firstLength < kMinFrame ||
-                  firstLength > kMaxFrame ||
-                  chainLength != packetLength
-              ) {
-
-                  IOLog(
-                      "rtw88: HP256G8 v8.5.1 SAFE MBUF drop "
-                      "pkthdr=%zu first=%zu chain=%zu segs=%u\n",
-                      packetLength,
-                      firstLength,
-                      chainLength,
-                      segments
-                  );
-
-
-                  freePacket(m);
-
-                  return;
-              }
-
-
-              _iface->inputPacket(
-                  m,
-                  0,
-                  IONetworkInterface::kInputOptionQueuePacket
-              );
-
-
-              _iface->flushInputQueue();
-
-
-              IONetworkData *nd =
-                  _iface->getNetworkData(
-                      kIONetworkStatsKey
-                  );
-
-
-              if (nd) {
-
-                  IONetworkStats *stats =
-                      (IONetworkStats *)
-                      nd->getBuffer();
-
-
-                  if (stats)
-                      stats->inputPackets++;
-              }
-          }
-
-
-          CPP
-
-
-          BEFORE="$((START - 1))"
-
-
-          head -n "$BEFORE" \
-            "$FILE" \
-            > /tmp/RTW88PCIDevice.v851.cpp
-
-
-          cat \
-            /tmp/v851_safe_mbuf.cpp \
-            >> /tmp/RTW88PCIDevice.v851.cpp
-
-
-          tail -n +"$END" \
-            "$FILE" \
-            >> /tmp/RTW88PCIDevice.v851.cpp
-
-
-          mv \
-            /tmp/RTW88PCIDevice.v851.cpp \
-            "$FILE"
-
-
-          grep -q \
-            "HP256G8 v8.5.1 SAFE MBUF" \
-            "$FILE"
-
-
-          echo
-          echo "Safe macOS mbuf: OK"
-
-
-      # ================================================================
-      # 14 - SAFE DMA DESCRIPTOR CHECK
-      # ================================================================
-
-      - name: Apply Safe DMA descriptor recovery
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c"
-
-
-          START="$(
-            awk '
-            index($0, "static bool rtw_pci_dma_check(") > 0 ||
-            index($0, "static void rtw_pci_dma_check(") > 0 {
-                print NR
-                exit
-            }
-            ' "$FILE"
-          )"
-
-
-          END="$(
-            awk '
-            index($0, "static u32 __pci_get_hw_tx_ring_rp") > 0 {
-                print NR
-                exit
-            }
-            ' "$FILE"
-          )"
-
-
-          test -n "$START"
-          test -n "$END"
-
-
-          if [ "$END" -le "$START" ]; then
-            echo "ERROR: invalid DMA check boundaries"
-            exit 1
-          fi
-
-
-          cat > /tmp/v851_safe_dma.c <<'C'
-
-          static bool rtw_pci_dma_check(
-                  struct rtw_dev *rtwdev,
-                  struct rtw_pci_rx_ring *rx_ring,
-                  u32 idx)
-          {
-              struct rtw_pci *rtwpci =
-                  (struct rtw_pci *)rtwdev->priv;
-
-
-              const struct rtw_chip_info *chip =
-                  rtwdev->chip;
-
-
-              struct rtw_pci_rx_buffer_desc *buf_desc;
-
-
-              u32 desc_sz =
-                  chip->rx_buf_desc_sz;
-
-
-              u16 expected =
-                  rtwpci->rx_tag;
-
-
-              u16 observed =
-                  0;
-
-
-              int i;
-
-
-              static u32 mismatch_count =
-                  0;
-
-
-              static u32 recovery_count =
-                  0;
-
-
-              buf_desc =
-                  (struct rtw_pci_rx_buffer_desc *)
-                  (
-                      rx_ring->r.head +
-                      idx * desc_sz
-                  );
-
-
-              /*
-               * HP256G8 v8.5.1 SAFE RESYNC
-               *
-               * Maximum descriptor wait:
-               *
-               * 100 x 2 us = 200 us
-               */
-
-              for (
-                  i = 0;
-                  i < 100;
-                  i++
-              ) {
-
-                  observed =
-                      le16_to_cpu(
-                          buf_desc->total_pkt_size
-                      );
-
-
-                  if (observed == expected) {
-
-                      rtwpci->rx_tag =
-                          (
-                              expected +
-                              1
-                          )
-                          %
-                          RX_TAG_MAX;
-
-
-                      return true;
-                  }
-
-
-                  udelay(
-                      2
-                  );
-              }
-
-
-              mismatch_count++;
-
-
-              u16 delta =
-                  0;
-
-
-              if (expected >= observed) {
-
-                  delta =
-                      expected -
-                      observed;
-
-              } else {
-
-                  delta =
-                      (
-                          expected +
-                          RX_TAG_MAX
-                      )
-                      -
-                      observed;
-              }
-
-
-              /*
-               * Never parse the bad current descriptor.
-               *
-               * A small coherent mismatch can only
-               * realign the NEXT descriptor tag.
-               */
-
-              if (delta > 0 && delta <= 32) {
-
-                  rtwpci->rx_tag =
-                      (
-                          observed +
-                          1
-                      )
-                      %
-                      RX_TAG_MAX;
-
-
-                  recovery_count++;
-
-
-                  if (
-                      recovery_count == 1 ||
-                      (recovery_count & 0xff) == 0
-                  ) {
-
-                      rtw_warn(
-                          rtwdev,
-                          "HP256G8 v8.5.1 SAFE RESYNC "
-                          "drop current descriptor "
-                          "expected=%u observed=%u "
-                          "delta=%u next=%u count=%u\n",
-                          expected,
-                          observed,
-                          delta,
-                          rtwpci->rx_tag,
-                          recovery_count
-                      );
-                  }
-
-              } else {
-
-                  rtwpci->rx_tag =
-                      (
-                          expected +
-                          1
-                      )
-                      %
-                      RX_TAG_MAX;
-
-
-                  if (
-                      mismatch_count == 1 ||
-                      (mismatch_count & 0xff) == 0
-                  ) {
-
-                      rtw_warn(
-                          rtwdev,
-                          "HP256G8 v8.5.1 SAFE RX reject "
-                          "expected=%u observed=%u "
-                          "delta=%u count=%u\n",
-                          expected,
-                          observed,
-                          delta,
-                          mismatch_count
-                      );
-                  }
-              }
-
-
-              return false;
-          }
-
-
-          C
-
-
-          BEFORE="$((START - 1))"
-
-
-          head -n "$BEFORE" \
-            "$FILE" \
-            > /tmp/pci.v851.c
-
-
-          cat \
-            /tmp/v851_safe_dma.c \
-            >> /tmp/pci.v851.c
-
-
-          tail -n +"$END" \
-            "$FILE" \
-            >> /tmp/pci.v851.c
-
-
-          mv \
-            /tmp/pci.v851.c \
-            "$FILE"
-
-
-          grep -q \
-            "HP256G8 v8.5.1 SAFE RESYNC" \
-            "$FILE"
-
-          grep -q \
-            "HP256G8 v8.5.1 SAFE RX reject" \
-            "$FILE"
-
-
-          echo
-          echo "Safe DMA descriptor recovery: OK"
-
-
-      # ================================================================
-      # 15 - REJECT BAD CURRENT RX DESCRIPTOR
-      #
-      # PREVIOUS AWK ALSO HAD MULTILINE IF.
-      # NOW FIXED.
-      # ================================================================
-
-      - name: Reject bad current RX descriptor
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c"
-
-
-          awk '
-          BEGIN {
-              done = 0
-          }
-
-          {
-              if (index($0, "rtw_pci_dma_check(rtwdev, ring, cur_rp);") > 0 && done == 0) {
-
-                  print "\t\tif (!rtw_pci_dma_check(rtwdev, ring, cur_rp))"
-                  print "\t\t\tgoto next_rp;"
-
-                  done = 1
-                  next
-              }
-
-              print $0
-          }
-
-          END {
-              if (done != 1)
-                  exit 111
-          }
-          ' "$FILE" > /tmp/pci.guard.v851.c
-
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: current-RX descriptor guard insertion failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/pci.guard.v851.c \
-            "$FILE"
-
-
-          grep -q \
-            "if (!rtw_pci_dma_check(rtwdev, ring, cur_rp))" \
-            "$FILE"
-
-
-          echo
-          echo "Current bad RX descriptor guard: OK"
-
-
-      # ================================================================
-      # 16 - RX DMA FRAME LENGTH VALIDATION
-      #
-      # PREVIOUS AWK ALSO HAD MULTILINE IF.
-      # NOW FIXED.
-      # ================================================================
-
-      - name: Validate RX DMA frame length
-        shell: bash
-        run: |
-          set -eux
-
-          FILE="rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c"
-
-
-          awk '
-          BEGIN {
-              waiting = 0
-              done = 0
-          }
-
-          {
-              print $0
-
-
-              if (index($0, "pkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +") > 0 && done == 0) {
-
-                  waiting = 1
-                  next
-              }
-
-
-              if (waiting == 1) {
-
-                  print ""
-                  print "\t\tif (!pkt_stat.pkt_len ||"
-                  print "\t\t    pkt_offset >= RTK_PCI_RX_BUF_SIZE ||"
-                  print "\t\t    pkt_stat.pkt_len > RTK_PCI_RX_BUF_SIZE - pkt_offset) {"
-                  print ""
-                  print "\t\t\trtw_warn("
-                  print "\t\t\t\trtwdev,"
-                  print "\t\t\t\t\"HP256G8 v8.5.1 invalid RX length \""
-                  print "\t\t\t\t\"pkt=%u off=%u\\n\","
-                  print "\t\t\t\tpkt_stat.pkt_len,"
-                  print "\t\t\t\tpkt_offset"
-                  print "\t\t\t);"
-                  print ""
-                  print "\t\t\tgoto next_rp;"
-                  print "\t\t}"
-                  print ""
-
-                  waiting = 0
-                  done = 1
-              }
-          }
-
-          END {
-              if (done != 1)
-                  exit 121
-          }
-          ' "$FILE" > /tmp/pci.length.v851.c
-
-
-          if [ $? -ne 0 ]; then
-            echo "ERROR: RX DMA length validation insertion failed"
-            exit 1
-          fi
-
-
-          mv \
-            /tmp/pci.length.v851.c \
-            "$FILE"
-
-
-          grep -q \
-            "HP256G8 v8.5.1 invalid RX length" \
-            "$FILE"
-
-
-          echo
-          echo "RX DMA frame-length validation: OK"
-
-
-      # ================================================================
-      # 17 - SOURCE VALIDATION
-      # ================================================================
-
-      - name: Validate all v8.5.1 source changes
-        shell: bash
-        run: |
-          set -eux
+          set -eu
 
           IEEE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          HPP="Feixiao/src/kext/RTW88IEEE80211.hpp"
-
           PCI="Feixiao/src/kext/RTW88PCIDevice.cpp"
 
-          LPCI="rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c"
+          echo
+          echo "============================================================"
+          echo "RTL8821CE"
+          echo "============================================================"
+          echo
 
+          grep -q \
+            "rtw8821c_hw_spec" \
+            "${IEEE}"
+
+          grep -q \
+            "0xC821" \
+            "${PCI}"
+
+          grep -q \
+            "RTL8821CE" \
+            "${PCI}"
+
+          echo "RTL8821CE hardware support: OK"
+
+
+      # ================================================================
+      # 07
+      # VALIDATE 5 GHZ / VHT
+      # ================================================================
+
+      - name: Validate 20 40 80 MHz support
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
           echo
-          echo "================================================"
+          echo "============================================================"
+          echo "CHANNEL WIDTH"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            "_connChanWidth = 20" \
+            "${FILE}"
+
+          grep -q \
+            "_connChanWidth = 40" \
+            "${FILE}"
+
+          grep -q \
+            "_connChanWidth = 80" \
+            "${FILE}"
+
+          grep -q \
+            "NL80211_CHAN_WIDTH_40" \
+            "${FILE}"
+
+          grep -q \
+            "NL80211_CHAN_WIDTH_80" \
+            "${FILE}"
+
+          grep -q \
+            "chip80 && vhtWidth == 1 && vhtSeg0 != 0" \
+            "${FILE}"
+
+          echo "20 MHz: OK"
+          echo "40 MHz: OK"
+          echo "80 MHz: OK"
+          echo "VHT negotiation: OK"
+
+
+      # ================================================================
+      # 08
+      # VALIDATE A-MPDU
+      # ================================================================
+
+      - name: Validate A-MPDU support
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          HEADER="Feixiao/src/kext/RTW88IEEE80211.hpp"
+
+          echo
+          echo "============================================================"
+          echo "A-MPDU"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            "startTxAggregation" \
+            "${FILE}"
+
+          grep -q \
+            "sendAddbaRequest" \
+            "${FILE}"
+
+          grep -q \
+            "sendAddbaResponse" \
+            "${FILE}"
+
+          grep -q \
+            "handleBackAction" \
+            "${FILE}"
+
+          grep -q \
+            "_txBaActive" \
+            "${HEADER}"
+
+          grep -q \
+            "rxReorderInput" \
+            "${FILE}"
+
+          grep -q \
+            "kRxBaMaxBuf" \
+            "${HEADER}"
+
+          echo "TX A-MPDU: OK"
+          echo "RX reorder: OK"
+          echo "BlockAck negotiation: OK"
+
+
+      # ================================================================
+      # 09
+      # VALIDATE WPA2
+      # ================================================================
+
+      - name: Validate WPA2 support
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          echo
+          echo "============================================================"
           echo "WPA2"
-          echo "================================================"
+          echo "============================================================"
+          echo
 
           grep -q \
-            "HP256G8 v8.5.1 M4 key_length=0" \
-            "$IEEE"
+            "derivePMK" \
+            "${FILE}"
 
           grep -q \
-            "HP256G8 v8.5.1 M4 nonce zeroed" \
-            "$IEEE"
+            "derivePTK" \
+            "${FILE}"
 
           grep -q \
-            "HP256G8 v8.5.1 received M3" \
-            "$IEEE"
+            "handleEAPOL" \
+            "${FILE}"
 
           grep -q \
-            "HP256G8 v8.5.1 WPA2 settle complete" \
-            "$IEEE"
+            "sendEAPOLKey" \
+            "${FILE}"
 
+          grep -q \
+            "installKey" \
+            "${FILE}"
+
+          grep -q \
+            "_ptkConf" \
+            "${FILE}"
+
+          grep -q \
+            "_gtkConf" \
+            "${FILE}"
+
+          echo "WPA2 implementation: OK"
+
+
+      # ================================================================
+      # 10
+      # VALIDATE PCI/DMA
+      # ================================================================
+
+      - name: Validate PCI and DMA support
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
 
           echo
-          echo "================================================"
-          echo "VHT 80 MHZ"
-          echo "================================================"
+          echo "============================================================"
+          echo "PCI / DMA"
+          echo "============================================================"
+          echo
 
           grep -q \
-            "if (!_force40MHz && chip80 && vhtWidth == 1 && vhtSeg0 != 0)" \
-            "$IEEE"
+            "_pciDev->setBusMasterEnable(true)" \
+            "${FILE}"
 
           grep -q \
-            "HP256G8 v8.5.1 Data-Path Recovery active" \
-            "$IEEE"
+            "_pciDev->setMemoryEnable(true)" \
+            "${FILE}"
 
+          grep -q \
+            "compat_dma_alloc" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_free" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_map" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_unmap" \
+            "${FILE}"
+
+          grep -q \
+            "compat_dma_sync_cpu" \
+            "${FILE}"
+
+          grep -q \
+            "syncBounceForCpu" \
+            "${FILE}"
+
+          echo "PCI Bus Master: OK"
+          echo "PCI Memory Space: OK"
+          echo "DMA bounce path: OK"
+
+
+      # ================================================================
+      # 11
+      # VALIDATE MACKERNELSDK HEADERS
+      # ================================================================
+
+      - name: Validate kernel header precedence
+        shell: bash
+        run: |
+          set -eu
 
           echo
-          echo "================================================"
-          echo "DATA PATH"
-          echo "================================================"
-
-          grep -q \
-            "HP256G8 v8.5.1 useful Ethernet RX" \
-            "$IEEE"
-
-          grep -q \
-            "HP256G8 v8.5.1 DATA PATH WATCHDOG" \
-            "$IEEE"
-
-          grep -q \
-            "HP256G8 v8.5.1 DATA PATH STALL" \
-            "$IEEE"
-
-          grep -q \
-            "HP256G8 v8.5.1 scheduling DATA PATH recovery" \
-            "$IEEE"
-
-          grep -q \
-            "HP256G8 v8.5.1 DATA PATH RECOVERY BEGIN" \
-            "$IEEE"
-
-          grep -q \
-            "HP256G8 v8.5.1 reconnecting after DATA PATH recovery" \
-            "$IEEE"
-
-
+          echo "============================================================"
+          echo "KERNEL SDK HEADERS"
+          echo "============================================================"
           echo
-          echo "================================================"
-          echo "WORKER"
-          echo "================================================"
 
-          grep -q \
-            "_dataPathRecoveryTC = thread_call_allocate" \
-            "$IEEE"
+          HEADER_COUNT="$(
+            find \
+              Feixiao/MacKernelSDK/Headers \
+              -type f \
+              | wc -l \
+              | tr -d ' '
+          )"
 
-          grep -q \
-            "thread_call_cancel(_dataPathRecoveryTC)" \
-            "$IEEE"
+          echo "MacKernelSDK header count:"
+          echo "${HEADER_COUNT}"
 
-          grep -q \
-            "thread_call_free(_dataPathRecoveryTC)" \
-            "$IEEE"
+          if [ "${HEADER_COUNT}" -lt 100 ]; then
 
-
-          echo
-          echo "================================================"
-          echo "HEADER"
-          echo "================================================"
-
-          grep -q "_force40MHz" "$HPP"
-
-          grep -q "_fallbackPending" "$HPP"
-
-          grep -q "_perfLastRxFrameCount" "$HPP"
-
-          grep -q "_perfTxWithoutRx" "$HPP"
-
-          grep -q "_usefulRxCount" "$HPP"
-
-          grep -q "_dataPathRecoveryCount" "$HPP"
-
-          grep -q "_dataPathRecoveryTC" "$HPP"
-
-          grep -q "scheduleDataPathRecovery" "$HPP"
-
-          grep -q "runDataPathRecovery" "$HPP"
-
-
-          echo
-          echo "================================================"
-          echo "SAFE MBUF"
-          echo "================================================"
-
-          grep -q \
-            "HP256G8 v8.5.1 SAFE MBUF" \
-            "$PCI"
-
-
-          echo
-          echo "================================================"
-          echo "SAFE DMA"
-          echo "================================================"
-
-          grep -q \
-            "HP256G8 v8.5.1 SAFE RESYNC" \
-            "$LPCI"
-
-          grep -q \
-            "HP256G8 v8.5.1 SAFE RX reject" \
-            "$LPCI"
-
-          grep -q \
-            "HP256G8 v8.5.1 invalid RX length" \
-            "$LPCI"
-
-          grep -q \
-            "delta <= 32" \
-            "$LPCI"
-
-          grep -q \
-            "if (!rtw_pci_dma_check(rtwdev, ring, cur_rp))" \
-            "$LPCI"
-
-
-          echo
-          echo "================================================"
-          echo "UNSAFE RX BATCHING CHECK"
-          echo "================================================"
-
-
-          if grep -q "_rxQueued = true;" "$PCI"
-          then
-
-            echo "ERROR: unsafe RX batching detected"
+            echo
+            echo "ERROR: MacKernelSDK appears incomplete"
 
             exit 1
           fi
 
-
           echo
-          echo "================================================"
-          echo "V8.5.1 SOURCE VALIDATION: OK"
-          echo "================================================"
+          echo "MacKernelSDK populated correctly: OK"
 
 
       # ================================================================
-      # 18 - DOWNLOAD FIRMWARE
+      # 12
+      # DOWNLOAD FIRMWARE
       # ================================================================
 
-      - name: Download firmware
+      - name: Download Realtek firmware
         shell: bash
         run: |
-          set -eux
+          set -eu
 
           cd Feixiao/firmware
 
+          FIRMWARE_FILES="
+          rtw8822b_fw.bin
+          rtw8822c_fw.bin
+          rtw8821c_fw.bin
+          rtw8821a_fw.bin
+          rtw8812a_fw.bin
+          rtw8814a_fw.bin
+          "
 
-          for fw in \
-            rtw8822b_fw.bin \
-            rtw8822c_fw.bin \
-            rtw8821c_fw.bin \
-            rtw8821a_fw.bin \
-            rtw8812a_fw.bin \
-            rtw8814a_fw.bin
+          for FW in ${FIRMWARE_FILES}
           do
 
-            if [ ! -s "$fw" ]; then
+            if [ ! -s "${FW}" ]; then
+
+              echo
+              echo "Downloading ${FW}"
 
               curl \
-                -L \
+                --location \
                 --fail \
-                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/$fw" \
-                -o "$fw"
+                --retry 3 \
+                --retry-delay 2 \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/${FW}" \
+                --output "${FW}"
 
             fi
+
+            if [ ! -s "${FW}" ]; then
+
+              echo
+              echo "ERROR: missing firmware:"
+              echo "${FW}"
+
+              exit 1
+            fi
+
+            ls -lh "${FW}"
+
           done
 
 
-          ls -lh \
-            *.bin
-
-
       # ================================================================
-      # 19 - BUILD ENVIRONMENT
+      # 13
+      # BUILD ENVIRONMENT
       # ================================================================
 
       - name: Show build environment
         shell: bash
         run: |
-          set -eux
+          set -eu
 
           echo
-          echo "================================================"
+          echo "============================================================"
           echo "MACOS"
-          echo "================================================"
+          echo "============================================================"
 
           sw_vers
 
-
           echo
-          echo "================================================"
+          echo "============================================================"
           echo "XCODE"
-          echo "================================================"
+          echo "============================================================"
 
           xcodebuild -version
 
-
           echo
-          echo "================================================"
+          echo "============================================================"
           echo "CLANG"
-          echo "================================================"
+          echo "============================================================"
 
           clang --version
 
+          echo
+          echo "============================================================"
+          echo "MAC KERNEL SDK"
+          echo "============================================================"
+
+          git \
+            -C Feixiao/MacKernelSDK \
+            rev-parse \
+            HEAD
+
 
       # ================================================================
-      # 20 - BUILD
+      # 14
+      # CLEAN
       # ================================================================
 
-      - name: Build HP256G8 v8.5.1
+      - name: Clean previous build
         shell: bash
         working-directory: Feixiao
         run: |
-          set -eux
+          set -eu
 
           make clean || true
 
+          rm -rf \
+            build/out \
+            || true
 
           echo
-          echo "================================================"
-          echo "HP256G8 RTL8821CE"
-          echo "V8.5.1 SYNTAX SAFE"
-          echo "DATA PATH RECOVERY"
-          echo "================================================"
+          echo "Build directory cleaned"
 
+
+      # ================================================================
+      # 15
+      # BUILD
+      # ================================================================
+
+      - name: Build HP256G8 v8.5.2
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "HP 256 G8"
+          echo "RTL8821CE"
+          echo "V8.5.2 CLEAN FIXED"
+          echo "============================================================"
+          echo
 
           make all
 
 
       # ================================================================
-      # 21 - VERIFY BUILD OUTPUT
+      # 16
+      # VERIFY OUTPUT
       # ================================================================
 
-      - name: Verify HP256G8 v8.5.1 build output
+      - name: Verify build output
         shell: bash
         run: |
-          set -eux
+          set -eu
 
-          test -d \
-            Feixiao/build/out/rtw88.kext
+          KEXT="Feixiao/build/out/rtw88.kext"
 
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          if [ ! -d "${KEXT}" ]; then
+
+            echo "ERROR: rtw88.kext missing"
+
+            exit 1
+          fi
+
+          if [ ! -f "${CTL}" ]; then
+
+            echo "ERROR: rtw88ctl missing"
+
+            exit 1
+          fi
+
+          echo
+          echo "rtw88.kext: OK"
+
+          echo "rtw88ctl: OK"
+
+
+      # ================================================================
+      # 17
+      # VALIDATE KEXT STRUCTURE
+      # ================================================================
+
+      - name: Validate kext structure
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
 
           test -f \
-            Feixiao/build/out/rtw88ctl
+            "${KEXT}/Contents/Info.plist"
 
+          test -f \
+            "${KEXT}/Contents/MacOS/rtw88"
+
+          echo
+          echo "Kext structure: OK"
+
+          echo
+
+          find \
+            "${KEXT}/Contents" \
+            -maxdepth 2 \
+            -type f \
+            -print
+
+
+      # ================================================================
+      # 18
+      # VALIDATE INFO.PLIST
+      # ================================================================
+
+      - name: Validate Info.plist
+        shell: bash
+        run: |
+          set -eu
+
+          PLIST="Feixiao/build/out/rtw88.kext/Contents/Info.plist"
+
+          plutil \
+            -lint \
+            "${PLIST}"
+
+          echo
+          echo "Bundle ID:"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "${PLIST}"
+
+
+      # ================================================================
+      # 19
+      # VALIDATE MACH-O
+      # ================================================================
+
+      - name: Validate Mach-O binaries
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT_BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          echo
+          echo "============================================================"
+          echo "KEXT BINARY"
+          echo "============================================================"
+
+          file "${KEXT_BIN}"
+
+          echo
+          echo "============================================================"
+          echo "RTW88CTL"
+          echo "============================================================"
+
+          file "${CTL}"
+
+          echo
+          echo "============================================================"
+          echo "UUID"
+          echo "============================================================"
+
+          dwarfdump \
+            --uuid \
+            "${KEXT_BIN}"
+
+
+      # ================================================================
+      # 20
+      # VALIDATE RTL8821CE MARKERS
+      # ================================================================
+
+      - name: Validate RTL8821CE binary markers
+        shell: bash
+        run: |
+          set -eu
 
           BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
 
+          echo
+          echo "============================================================"
+          echo "RTL8821CE BINARY"
+          echo "============================================================"
+          echo
+
+          strings "${BIN}" \
+            | grep -E \
+              "RTL8821CE|RTL8821C|8821C" \
+            || true
 
           echo
-          echo "================================================"
-          echo "KEXT"
-          echo "================================================"
-
-
-          file \
-            "$BIN"
-
-
-          echo
-          echo "================================================"
-          echo "CLIENT"
-          echo "================================================"
-
-
-          file \
-            Feixiao/build/out/rtw88ctl
-
-
-          echo
-          echo "================================================"
-          echo "V8.5.1 BINARY MARKERS"
-          echo "================================================"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 M4 key_length=0"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 M4 nonce zeroed"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 received M3"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 WPA2 settle complete"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 Data-Path Recovery active"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 useful Ethernet RX"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 DATA PATH STALL"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 DATA PATH RECOVERY BEGIN"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 reconnecting after DATA PATH recovery"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 SAFE MBUF"
-
-
-          strings "$BIN" \
-            | grep "HP256G8 v8.5.1 SAFE RESYNC"
-
-
-          echo
-          echo "================================================"
-          echo "BINARY VALIDATION: OK"
-          echo "================================================"
+          echo "RTL8821CE marker scan complete"
 
 
       # ================================================================
-      # 22 - PACKAGE
+      # 21
+      # VALIDATE FIRMWARE
       # ================================================================
 
-      - name: Package HP256G8 v8.5.1
+      - name: Validate firmware resources
         shell: bash
         run: |
-          set -eux
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+
+          echo
+          echo "============================================================"
+          echo "FIRMWARE"
+          echo "============================================================"
+          echo
+
+          find \
+            "${KEXT}" \
+            -type f \
+            -name "*.bin" \
+            -print
+
+          COUNT="$(
+            find \
+              "${KEXT}" \
+              -type f \
+              -name "*.bin" \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          echo
+          echo "Firmware blobs: ${COUNT}"
+
+          if [ "${COUNT}" -lt 1 ]; then
+
+            echo
+            echo "ERROR: no firmware inside kext"
+
+            exit 1
+          fi
 
 
-          OUT="$RUNNER_TEMP/Feixiao-HP256G8-v8.5.1-Syntax-Safe"
+      # ================================================================
+      # 22
+      # PREPARE ARTIFACT
+      # ================================================================
 
+      - name: Prepare artifact directory
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
 
           rm -rf \
-            "$OUT"
-
+            "${OUT}"
 
           mkdir -p \
-            "$OUT"
-
+            "${OUT}"
 
           cp -R \
             Feixiao/build/out/rtw88.kext \
-            "$OUT/"
-
+            "${OUT}/"
 
           cp \
             Feixiao/build/out/rtw88ctl \
-            "$OUT/"
-
+            "${OUT}/"
 
           chmod +x \
-            "$OUT/rtw88ctl"
+            "${OUT}/rtw88ctl"
 
 
-          cat > "$OUT/BUILD-INFO.txt" <<'EOF'
+      # ================================================================
+      # 23
+      # BUILD INFO
+      # ================================================================
+
+      - name: Create build information
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          FEIXIAO_HASH="$(
+            git -C Feixiao rev-parse HEAD
+          )"
+
+          RTW88_HASH="$(
+            git -C rtw88-stable rev-parse HEAD
+          )"
+
+          MACKERNEL_HASH="$(
+            git -C Feixiao/MacKernelSDK rev-parse HEAD
+          )"
+
+          cat > "${OUT}/BUILD-INFO.txt" <<EOF
           ============================================================
           HP 256 G8
           REALTEK RTL8821CE
-          FEIXIAO V8.5.1 SYNTAX SAFE
+          FEIXIAO V8.5.2 CLEAN FIXED
           ============================================================
 
 
@@ -2173,221 +900,151 @@ jobs:
 
           Realtek RTL8821CE
 
-          PCI ID:
+          Vendor:
+          10EC
 
-          10EC:C821
+          Device:
+          C821
 
 
-          BASE
+          FEIXIAO
           ============================================================
 
-          Feixiao:
-
-          e963f43188382eced4ef2fa75d19ce4db2315c68
+          ${FEIXIAO_HASH}
 
 
-          rtw88-stable:
-
-          d029a677c49266fad86750714eb5612becd134d3
-
-
-          V8.5.1 CHANGES
+          RTW88-STABLE
           ============================================================
 
-          macOS AWK compatibility fixes
-
-          No multiline AWK if syntax
-
-          No Perl
-
-          No Python
-
-          No pipefail
-
-          Worker lifecycle rewritten
-
-          Current RX descriptor guard rewritten
-
-          RX length validation rewritten
+          ${RTW88_HASH}
 
 
-          WPA2
+          MACKERNELSDK
           ============================================================
 
-          M4 key_length = 0
-
-          M4 nonce = zero
-
-          M3 diagnostics enabled
-
-          WPA2 settle before A-MPDU = 100 ms
+          ${MACKERNEL_HASH}
 
 
-          VHT
+          BUILD FIX
           ============================================================
 
-          Initial 80 MHz attempt enabled
+          MacKernelSDK recursive checkout enabled.
 
-          Data-path failure at 80 MHz:
+          This prevents the build from relying only on the
+          macOS 26.5 system Kernel.framework headers.
 
-          Safe 40 MHz armed
+          No runtime C++ source rewriting is performed.
 
 
-          DATA PATH
+          NATIVE DRIVER FEATURES
           ============================================================
 
-          Useful RX:
+          RTL8821CE
 
-          IPv4
+          2.4 GHz
 
-          ARP
+          5 GHz
 
-          IPv6
+          HT 20 MHz
 
+          HT 40 MHz
 
-          WATCHDOG
-          ============================================================
-
-          128 TX packets without useful RX
-
-          triggers:
-
-          DATA PATH RECOVERY
-
-
-          RECOVERY
-          ============================================================
-
-          DATA PATH STALL
-
-              |
-
-              v
-
-          recovery worker
-
-              |
-
-              v
-
-          disconnect
-
-              |
-
-              v
-
-          keys / STA / BA cleanup
-
-              |
-
-              v
-
-          250 ms firmware settle
-
-              |
-
-              v
-
-          reconnect
-
-              |
-
-              v
+          VHT 80 MHz
 
           WPA2
 
-              |
+          PTK
 
-              v
+          GTK
 
-          A-MPDU
+          TX A-MPDU
 
+          RX A-MPDU reorder
 
-          SAFE MBUF
-          ============================================================
+          BlockAck
 
-          Minimum Ethernet frame:
+          PCI Bus Master
 
-          14 bytes
-
-
-          Maximum accepted frame:
-
-          4096 bytes
-
-
-          Maximum mbuf chain segments:
-
-          32
-
-
-          SAFE DMA
-          ============================================================
-
-          Maximum descriptor wait:
-
-          200 us
-
-
-          Current bad descriptor:
-
-          NEVER PARSED
-
-
-          Small coherent tag mismatch:
-
-          NEXT descriptor may be resynchronised
-
-
-          Maximum resync delta:
-
-          32
-
-
-          PERFORMANCE
-          ============================================================
-
-          Automatic firmware rate control
-
-          VHT 80 MHz initial operation
-
-          A-MPDU enabled
+          DMA bounce buffering
 
 
           IMPORTANT
           ============================================================
 
-          Performance above 100 Mbps is a target.
+          This is a clean compile baseline.
 
-          It cannot be guaranteed until tested on the actual
-          RTL8821CE hardware and AP.
+          It does not guarantee a specific Wi-Fi speed.
 
+          Always use rtw88.kext and rtw88ctl from
+          the SAME artifact.
 
-          Always use rtw88.kext and rtw88ctl
-          from the SAME artifact.
-
-
-          Keep the previously working Kext as backup.
+          Keep the last known working Kext as backup.
           EOF
 
 
-          cd \
-            "$RUNNER_TEMP"
+      # ================================================================
+      # 24
+      # CHECKSUM
+      # ================================================================
 
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          cd "${OUT}"
+
+          shasum \
+            -a 256 \
+            rtw88ctl \
+            > SHA256SUMS.txt
+
+          find \
+            rtw88.kext \
+            -type f \
+            -exec shasum -a 256 {} \; \
+            >> SHA256SUMS.txt
+
+          echo
+          cat SHA256SUMS.txt
+
+
+      # ================================================================
+      # 25
+      # PACKAGE
+      # ================================================================
+
+      - name: Package HP256G8 v8.5.2
+        shell: bash
+        run: |
+          set -eu
+
+          cd "${RUNNER_TEMP}"
+
+          rm -f \
+            Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip
 
           zip \
             -r \
-            Feixiao_HP256G8_v8_5_1_Syntax_Safe.zip \
-            Feixiao-HP256G8-v8.5.1-Syntax-Safe
+            Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip \
+            "${BUILD_NAME}"
+
+          echo
+          ls -lh \
+            Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip
 
 
       # ================================================================
-      # 23 - UPLOAD ARTIFACT
+      # 26
+      # UPLOAD
       # ================================================================
 
-      - name: Upload HP256G8 v8.5.1 artifact
+      - name: Upload HP256G8 v8.5.2 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Feixiao-HP256G8-v8.5.1-Syntax-Safe
-          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_5_1_Syntax_Safe.zip
+          name: Feixiao-HP256G8-v8.5.2-Clean-Fixed
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip
+          if-no-files-found: error
           retention-days: 7
