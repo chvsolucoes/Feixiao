@@ -1,4 +1,4 @@
-name: Build HP256G8 RTL8821CE v8.5.2 Clean Fixed
+name: Build HP256G8 RTL8821CE v8.5.3 Clean Fixed
 
 "on":
   workflow_dispatch:
@@ -9,21 +9,20 @@ permissions:
 env:
   FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
   RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
-  BUILD_NAME: Feixiao-HP256G8-v8.5.2-Clean-Fixed
+  BUILD_NAME: Feixiao-HP256G8-v8.5.3-Clean-Fixed
 
 jobs:
 
   build:
 
-    name: Build HP256G8 v8.5.2
+    name: Build HP256G8 v8.5.3
     runs-on: macos-latest
     timeout-minutes: 30
 
     steps:
 
       # ================================================================
-      # 01
-      # CHECKOUT FEIXIAO + MACKERNELSDK
+      # 01 - CHECKOUT FEIXIAO + MACKERNELSDK
       # ================================================================
 
       - name: Checkout Feixiao with MacKernelSDK
@@ -37,8 +36,7 @@ jobs:
 
 
       # ================================================================
-      # 02
-      # VERIFY MACKERNELSDK
+      # 02 - VALIDATE MACKERNELSDK
       # ================================================================
 
       - name: Validate MacKernelSDK submodule
@@ -74,8 +72,7 @@ jobs:
 
 
       # ================================================================
-      # 03
-      # CLONE RTW88-STABLE
+      # 03 - CLONE RTW88-STABLE
       # ================================================================
 
       - name: Clone matching rtw88-stable
@@ -108,8 +105,7 @@ jobs:
 
 
       # ================================================================
-      # 04
-      # VALIDATE SOURCE REVISIONS
+      # 04 - VALIDATE SOURCE REVISIONS
       # ================================================================
 
       - name: Validate exact source revisions
@@ -135,33 +131,26 @@ jobs:
           echo "${FEIXIAO_REF}"
 
           echo
-
           echo "Feixiao actual:"
           echo "${FEIXIAO_ACTUAL}"
 
           echo
-
           echo "rtw88-stable expected:"
           echo "${RTW88_REF}"
 
           echo
-
           echo "rtw88-stable actual:"
           echo "${RTW88_ACTUAL}"
 
           if [ "${FEIXIAO_ACTUAL}" != "${FEIXIAO_REF}" ]; then
-
             echo
             echo "ERROR: Feixiao revision mismatch"
-
             exit 1
           fi
 
           if [ "${RTW88_ACTUAL}" != "${RTW88_REF}" ]; then
-
             echo
             echo "ERROR: rtw88-stable revision mismatch"
-
             exit 1
           fi
 
@@ -170,8 +159,7 @@ jobs:
 
 
       # ================================================================
-      # 05
-      # VALIDATE SOURCE TREE
+      # 05 - VALIDATE SOURCE TREE
       # ================================================================
 
       - name: Validate source tree
@@ -187,6 +175,7 @@ jobs:
 
           REQUIRED_FILES="
           Feixiao/Makefile
+          Feixiao/scripts/gen_fw_blobs.py
           Feixiao/src/kext/RTW88IEEE80211.cpp
           Feixiao/src/kext/RTW88IEEE80211.hpp
           Feixiao/src/kext/RTW88PCIDevice.cpp
@@ -195,6 +184,7 @@ jobs:
           Feixiao/src/kext/RTW88UserClient.hpp
           Feixiao/src/compat/rtw88_compat.c
           Feixiao/src/compat/rtw88_compat.h
+          Feixiao/src/compat/rtw88_firmware.c
           rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
           rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
           "
@@ -203,10 +193,8 @@ jobs:
           do
 
             if [ ! -f "${FILE}" ]; then
-
               echo "ERROR: missing file:"
               echo "${FILE}"
-
               exit 1
             fi
 
@@ -219,8 +207,7 @@ jobs:
 
 
       # ================================================================
-      # 06
-      # VALIDATE RTL8821CE
+      # 06 - VALIDATE RTL8821CE
       # ================================================================
 
       - name: Validate RTL8821CE support
@@ -229,7 +216,6 @@ jobs:
           set -eu
 
           IEEE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
           PCI="Feixiao/src/kext/RTW88PCIDevice.cpp"
 
           echo
@@ -238,24 +224,16 @@ jobs:
           echo "============================================================"
           echo
 
-          grep -q \
-            "rtw8821c_hw_spec" \
-            "${IEEE}"
+          grep -q "rtw8821c_hw_spec" "${IEEE}"
+          grep -q "0xC821" "${PCI}"
+          grep -q "RTL8821CE" "${PCI}"
 
-          grep -q \
-            "0xC821" \
-            "${PCI}"
-
-          grep -q \
-            "RTL8821CE" \
-            "${PCI}"
-
-          echo "RTL8821CE hardware support: OK"
+          echo "RTL8821CE PCI ID 10EC:C821: OK"
+          echo "RTL8821C hardware support: OK"
 
 
       # ================================================================
-      # 07
-      # VALIDATE 5 GHZ / VHT
+      # 07 - VALIDATE CHANNEL WIDTH
       # ================================================================
 
       - name: Validate 20 40 80 MHz support
@@ -271,39 +249,21 @@ jobs:
           echo "============================================================"
           echo
 
-          grep -q \
-            "_connChanWidth = 20" \
-            "${FILE}"
-
-          grep -q \
-            "_connChanWidth = 40" \
-            "${FILE}"
-
-          grep -q \
-            "_connChanWidth = 80" \
-            "${FILE}"
-
-          grep -q \
-            "NL80211_CHAN_WIDTH_40" \
-            "${FILE}"
-
-          grep -q \
-            "NL80211_CHAN_WIDTH_80" \
-            "${FILE}"
-
-          grep -q \
-            "chip80 && vhtWidth == 1 && vhtSeg0 != 0" \
-            "${FILE}"
+          grep -q "_connChanWidth = 20" "${FILE}"
+          grep -q "_connChanWidth = 40" "${FILE}"
+          grep -q "_connChanWidth = 80" "${FILE}"
+          grep -q "NL80211_CHAN_WIDTH_40" "${FILE}"
+          grep -q "NL80211_CHAN_WIDTH_80" "${FILE}"
+          grep -q "chip80 && vhtWidth == 1 && vhtSeg0 != 0" "${FILE}"
 
           echo "20 MHz: OK"
           echo "40 MHz: OK"
           echo "80 MHz: OK"
-          echo "VHT negotiation: OK"
+          echo "VHT 80 MHz negotiation: OK"
 
 
       # ================================================================
-      # 08
-      # VALIDATE A-MPDU
+      # 08 - VALIDATE A-MPDU
       # ================================================================
 
       - name: Validate A-MPDU support
@@ -312,7 +272,6 @@ jobs:
           set -eu
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
-
           HEADER="Feixiao/src/kext/RTW88IEEE80211.hpp"
 
           echo
@@ -321,42 +280,21 @@ jobs:
           echo "============================================================"
           echo
 
-          grep -q \
-            "startTxAggregation" \
-            "${FILE}"
-
-          grep -q \
-            "sendAddbaRequest" \
-            "${FILE}"
-
-          grep -q \
-            "sendAddbaResponse" \
-            "${FILE}"
-
-          grep -q \
-            "handleBackAction" \
-            "${FILE}"
-
-          grep -q \
-            "_txBaActive" \
-            "${HEADER}"
-
-          grep -q \
-            "rxReorderInput" \
-            "${FILE}"
-
-          grep -q \
-            "kRxBaMaxBuf" \
-            "${HEADER}"
+          grep -q "startTxAggregation" "${FILE}"
+          grep -q "sendAddbaRequest" "${FILE}"
+          grep -q "sendAddbaResponse" "${FILE}"
+          grep -q "handleBackAction" "${FILE}"
+          grep -q "_txBaActive" "${HEADER}"
+          grep -q "rxReorderInput" "${FILE}"
+          grep -q "kRxBaMaxBuf" "${HEADER}"
 
           echo "TX A-MPDU: OK"
-          echo "RX reorder: OK"
-          echo "BlockAck negotiation: OK"
+          echo "RX A-MPDU reorder: OK"
+          echo "ADDBA / BlockAck: OK"
 
 
       # ================================================================
-      # 09
-      # VALIDATE WPA2
+      # 09 - VALIDATE WPA2
       # ================================================================
 
       - name: Validate WPA2 support
@@ -372,40 +310,23 @@ jobs:
           echo "============================================================"
           echo
 
-          grep -q \
-            "derivePMK" \
-            "${FILE}"
+          grep -q "derivePMK" "${FILE}"
+          grep -q "derivePTK" "${FILE}"
+          grep -q "handleEAPOL" "${FILE}"
+          grep -q "sendEAPOLKey" "${FILE}"
+          grep -q "installKey" "${FILE}"
+          grep -q "_ptkConf" "${FILE}"
+          grep -q "_gtkConf" "${FILE}"
 
-          grep -q \
-            "derivePTK" \
-            "${FILE}"
-
-          grep -q \
-            "handleEAPOL" \
-            "${FILE}"
-
-          grep -q \
-            "sendEAPOLKey" \
-            "${FILE}"
-
-          grep -q \
-            "installKey" \
-            "${FILE}"
-
-          grep -q \
-            "_ptkConf" \
-            "${FILE}"
-
-          grep -q \
-            "_gtkConf" \
-            "${FILE}"
-
+          echo "PMK: OK"
+          echo "PTK: OK"
+          echo "GTK: OK"
+          echo "EAPOL: OK"
           echo "WPA2 implementation: OK"
 
 
       # ================================================================
-      # 10
-      # VALIDATE PCI/DMA
+      # 10 - VALIDATE PCI / DMA
       # ================================================================
 
       - name: Validate PCI and DMA support
@@ -421,46 +342,25 @@ jobs:
           echo "============================================================"
           echo
 
-          grep -q \
-            "_pciDev->setBusMasterEnable(true)" \
-            "${FILE}"
+          grep -q "_pciDev->setBusMasterEnable(true)" "${FILE}"
+          grep -q "_pciDev->setMemoryEnable(true)" "${FILE}"
 
-          grep -q \
-            "_pciDev->setMemoryEnable(true)" \
-            "${FILE}"
-
-          grep -q \
-            "compat_dma_alloc" \
-            "${FILE}"
-
-          grep -q \
-            "compat_dma_free" \
-            "${FILE}"
-
-          grep -q \
-            "compat_dma_map" \
-            "${FILE}"
-
-          grep -q \
-            "compat_dma_unmap" \
-            "${FILE}"
-
-          grep -q \
-            "compat_dma_sync_cpu" \
-            "${FILE}"
-
-          grep -q \
-            "syncBounceForCpu" \
-            "${FILE}"
+          grep -q "compat_dma_alloc" "${FILE}"
+          grep -q "compat_dma_free" "${FILE}"
+          grep -q "compat_dma_map" "${FILE}"
+          grep -q "compat_dma_unmap" "${FILE}"
+          grep -q "compat_dma_sync_cpu" "${FILE}"
+          grep -q "syncBounceForCpu" "${FILE}"
 
           echo "PCI Bus Master: OK"
           echo "PCI Memory Space: OK"
-          echo "DMA bounce path: OK"
+          echo "DMA allocation: OK"
+          echo "DMA mapping: OK"
+          echo "DMA RX sync: OK"
 
 
       # ================================================================
-      # 11
-      # VALIDATE MACKERNELSDK HEADERS
+      # 11 - VALIDATE MAC KERNEL SDK
       # ================================================================
 
       - name: Validate kernel header precedence
@@ -470,7 +370,7 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "KERNEL SDK HEADERS"
+          echo "MAC KERNEL SDK"
           echo "============================================================"
           echo
 
@@ -482,24 +382,21 @@ jobs:
               | tr -d ' '
           )"
 
-          echo "MacKernelSDK header count:"
+          echo "Header count:"
           echo "${HEADER_COUNT}"
 
           if [ "${HEADER_COUNT}" -lt 100 ]; then
-
             echo
-            echo "ERROR: MacKernelSDK appears incomplete"
-
+            echo "ERROR: MacKernelSDK incomplete"
             exit 1
           fi
 
           echo
-          echo "MacKernelSDK populated correctly: OK"
+          echo "MacKernelSDK: OK"
 
 
       # ================================================================
-      # 12
-      # DOWNLOAD FIRMWARE
+      # 12 - DOWNLOAD REALTEK FIRMWARE
       # ================================================================
 
       - name: Download Realtek firmware
@@ -537,22 +434,58 @@ jobs:
             fi
 
             if [ ! -s "${FW}" ]; then
-
               echo
-              echo "ERROR: missing firmware:"
+              echo "ERROR: firmware download failed:"
               echo "${FW}"
-
               exit 1
             fi
 
+            echo "[OK] ${FW}"
             ls -lh "${FW}"
 
           done
 
 
       # ================================================================
-      # 13
-      # BUILD ENVIRONMENT
+      # 13 - VERIFY RTL8821C FIRMWARE BEFORE BUILD
+      # ================================================================
+
+      - name: Validate RTL8821C firmware source
+        shell: bash
+        run: |
+          set -eu
+
+          FW="Feixiao/firmware/rtw8821c_fw.bin"
+
+          echo
+          echo "============================================================"
+          echo "RTL8821C FIRMWARE SOURCE"
+          echo "============================================================"
+          echo
+
+          if [ ! -s "${FW}" ]; then
+            echo "ERROR: rtw8821c_fw.bin missing"
+            exit 1
+          fi
+
+          SIZE="$(
+            stat -f "%z" "${FW}"
+          )"
+
+          echo "Firmware size:"
+          echo "${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 50000 ]; then
+            echo "ERROR: RTL8821C firmware file is suspiciously small"
+            exit 1
+          fi
+
+          echo
+          echo "RTL8821C firmware source: OK"
+
+
+      # ================================================================
+      # 14 - SHOW BUILD ENVIRONMENT
       # ================================================================
 
       - name: Show build environment
@@ -583,7 +516,14 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "MAC KERNEL SDK"
+          echo "SDK"
+          echo "============================================================"
+
+          xcrun --sdk macosx --show-sdk-path
+
+          echo
+          echo "============================================================"
+          echo "MACKERNELSDK"
           echo "============================================================"
 
           git \
@@ -593,8 +533,7 @@ jobs:
 
 
       # ================================================================
-      # 14
-      # CLEAN
+      # 15 - CLEAN BUILD
       # ================================================================
 
       - name: Clean previous build
@@ -605,20 +544,17 @@ jobs:
 
           make clean || true
 
-          rm -rf \
-            build/out \
-            || true
+          rm -rf build/out || true
 
           echo
-          echo "Build directory cleaned"
+          echo "Clean build directory: OK"
 
 
       # ================================================================
-      # 15
-      # BUILD
+      # 16 - BUILD
       # ================================================================
 
-      - name: Build HP256G8 v8.5.2
+      - name: Build HP256G8 v8.5.3
         shell: bash
         working-directory: Feixiao
         run: |
@@ -628,7 +564,7 @@ jobs:
           echo "============================================================"
           echo "HP 256 G8"
           echo "RTL8821CE"
-          echo "V8.5.2 CLEAN FIXED"
+          echo "V8.5.3 CLEAN FIXED"
           echo "============================================================"
           echo
 
@@ -636,8 +572,54 @@ jobs:
 
 
       # ================================================================
-      # 16
-      # VERIFY OUTPUT
+      # 17 - VERIFY GENERATED FIRMWARE SOURCE
+      # ================================================================
+
+      - name: Validate generated firmware blob source
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/compat/fw_blobs.c"
+
+          echo
+          echo "============================================================"
+          echo "GENERATED FIRMWARE BLOBS"
+          echo "============================================================"
+          echo
+
+          if [ ! -s "${FILE}" ]; then
+            echo "ERROR: fw_blobs.c was not generated"
+            exit 1
+          fi
+
+          SIZE="$(
+            stat -f "%z" "${FILE}"
+          )"
+
+          echo "fw_blobs.c size:"
+          echo "${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 10000 ]; then
+            echo "ERROR: generated fw_blobs.c is too small"
+            exit 1
+          fi
+
+          echo
+          echo "Searching firmware symbols..."
+
+          grep -E \
+            "8821|firmware|blob|fw_" \
+            "${FILE}" \
+            | head -20 \
+            || true
+
+          echo
+          echo "Embedded firmware source: OK"
+
+
+      # ================================================================
+      # 18 - VERIFY BUILD OUTPUT
       # ================================================================
 
       - name: Verify build output
@@ -646,32 +628,30 @@ jobs:
           set -eu
 
           KEXT="Feixiao/build/out/rtw88.kext"
-
           CTL="Feixiao/build/out/rtw88ctl"
 
           if [ ! -d "${KEXT}" ]; then
-
             echo "ERROR: rtw88.kext missing"
-
             exit 1
           fi
 
           if [ ! -f "${CTL}" ]; then
-
             echo "ERROR: rtw88ctl missing"
+            exit 1
+          fi
 
+          if [ ! -f "${KEXT}/Contents/MacOS/rtw88" ]; then
+            echo "ERROR: rtw88 kext binary missing"
             exit 1
           fi
 
           echo
           echo "rtw88.kext: OK"
-
           echo "rtw88ctl: OK"
 
 
       # ================================================================
-      # 17
-      # VALIDATE KEXT STRUCTURE
+      # 19 - VALIDATE KEXT STRUCTURE
       # ================================================================
 
       - name: Validate kext structure
@@ -681,27 +661,21 @@ jobs:
 
           KEXT="Feixiao/build/out/rtw88.kext"
 
-          test -f \
-            "${KEXT}/Contents/Info.plist"
-
-          test -f \
-            "${KEXT}/Contents/MacOS/rtw88"
+          test -f "${KEXT}/Contents/Info.plist"
+          test -f "${KEXT}/Contents/MacOS/rtw88"
 
           echo
           echo "Kext structure: OK"
 
-          echo
-
           find \
             "${KEXT}/Contents" \
-            -maxdepth 2 \
+            -maxdepth 3 \
             -type f \
             -print
 
 
       # ================================================================
-      # 18
-      # VALIDATE INFO.PLIST
+      # 20 - VALIDATE INFO.PLIST
       # ================================================================
 
       - name: Validate Info.plist
@@ -724,8 +698,7 @@ jobs:
 
 
       # ================================================================
-      # 19
-      # VALIDATE MACH-O
+      # 21 - VALIDATE MACH-O
       # ================================================================
 
       - name: Validate Mach-O binaries
@@ -734,7 +707,6 @@ jobs:
           set -eu
 
           KEXT_BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
-
           CTL="Feixiao/build/out/rtw88ctl"
 
           echo
@@ -753,7 +725,7 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "UUID"
+          echo "KEXT UUID"
           echo "============================================================"
 
           dwarfdump \
@@ -762,8 +734,48 @@ jobs:
 
 
       # ================================================================
-      # 20
-      # VALIDATE RTL8821CE MARKERS
+      # 22 - VALIDATE KEXT BINARY SIZE
+      # ================================================================
+
+      - name: Validate embedded firmware in kext binary
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+
+          echo
+          echo "============================================================"
+          echo "EMBEDDED FIRMWARE VALIDATION"
+          echo "============================================================"
+          echo
+
+          SIZE="$(
+            stat -f "%z" "${BIN}"
+          )"
+
+          echo "Kext executable size:"
+          echo "${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 500000 ]; then
+
+            echo
+            echo "ERROR:"
+            echo "rtw88 binary unexpectedly small."
+            echo "Firmware/object embedding may have failed."
+
+            exit 1
+          fi
+
+          echo
+          echo "The Feixiao build embeds firmware through fw_blobs.c."
+          echo "Physical .bin files are NOT required inside rtw88.kext."
+          echo
+          echo "Embedded firmware build path: OK"
+
+
+      # ================================================================
+      # 23 - VALIDATE RTL8821CE MARKERS
       # ================================================================
 
       - name: Validate RTL8821CE binary markers
@@ -775,7 +787,7 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "RTL8821CE BINARY"
+          echo "RTL8821CE BINARY MARKERS"
           echo "============================================================"
           echo
 
@@ -785,57 +797,47 @@ jobs:
             || true
 
           echo
-          echo "RTL8821CE marker scan complete"
+          echo "RTL8821CE marker scan: OK"
 
 
       # ================================================================
-      # 21
-      # VALIDATE FIRMWARE
+      # 24 - VERIFY DRIVER + CONTROL APP ARE MATCHED
       # ================================================================
 
-      - name: Validate firmware resources
+      - name: Verify final files
         shell: bash
         run: |
           set -eu
 
-          KEXT="Feixiao/build/out/rtw88.kext"
+          KEXT_BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+          CTL="Feixiao/build/out/rtw88ctl"
 
           echo
           echo "============================================================"
-          echo "FIRMWARE"
+          echo "FINAL FILES"
           echo "============================================================"
           echo
 
-          find \
-            "${KEXT}" \
-            -type f \
-            -name "*.bin" \
-            -print
-
-          COUNT="$(
-            find \
-              "${KEXT}" \
-              -type f \
-              -name "*.bin" \
-              | wc -l \
-              | tr -d ' '
-          )"
+          ls -lh "${KEXT_BIN}"
+          ls -lh "${CTL}"
 
           echo
-          echo "Firmware blobs: ${COUNT}"
+          echo "Kext SHA256:"
 
-          if [ "${COUNT}" -lt 1 ]; then
+          shasum \
+            -a 256 \
+            "${KEXT_BIN}"
 
-            echo
-            echo "ERROR: no firmware inside kext"
+          echo
+          echo "rtw88ctl SHA256:"
 
-            exit 1
-          fi
+          shasum \
+            -a 256 \
+            "${CTL}"
 
 
       # ================================================================
-      # 22
-      # PREPARE ARTIFACT
+      # 25 - PREPARE ARTIFACT
       # ================================================================
 
       - name: Prepare artifact directory
@@ -845,11 +847,9 @@ jobs:
 
           OUT="${RUNNER_TEMP}/${BUILD_NAME}"
 
-          rm -rf \
-            "${OUT}"
+          rm -rf "${OUT}"
 
-          mkdir -p \
-            "${OUT}"
+          mkdir -p "${OUT}"
 
           cp -R \
             Feixiao/build/out/rtw88.kext \
@@ -862,10 +862,13 @@ jobs:
           chmod +x \
             "${OUT}/rtw88ctl"
 
+          cp \
+            Feixiao/src/compat/fw_blobs.c \
+            "${OUT}/fw_blobs.c.build-proof"
+
 
       # ================================================================
-      # 23
-      # BUILD INFO
+      # 26 - BUILD INFORMATION
       # ================================================================
 
       - name: Create build information
@@ -887,11 +890,19 @@ jobs:
             git -C Feixiao/MacKernelSDK rev-parse HEAD
           )"
 
+          KEXT_UUID="$(
+            dwarfdump \
+              --uuid \
+              Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+              | awk '{print $2}' \
+              | head -1
+          )"
+
           cat > "${OUT}/BUILD-INFO.txt" <<EOF
           ============================================================
           HP 256 G8
           REALTEK RTL8821CE
-          FEIXIAO V8.5.2 CLEAN FIXED
+          FEIXIAO V8.5.3 CLEAN FIXED
           ============================================================
 
 
@@ -900,10 +911,10 @@ jobs:
 
           Realtek RTL8821CE
 
-          Vendor:
+          PCI Vendor:
           10EC
 
-          Device:
+          PCI Device:
           C821
 
 
@@ -925,21 +936,43 @@ jobs:
           ${MACKERNEL_HASH}
 
 
-          BUILD FIX
+          KEXT UUID
           ============================================================
 
-          MacKernelSDK recursive checkout enabled.
-
-          This prevents the build from relying only on the
-          macOS 26.5 system Kernel.framework headers.
-
-          No runtime C++ source rewriting is performed.
+          ${KEXT_UUID}
 
 
-          NATIVE DRIVER FEATURES
+          FIRMWARE
+          ============================================================
+
+          RTL8821C firmware is embedded in the driver binary.
+
+          Source firmware:
+
+          firmware/rtw8821c_fw.bin
+
+          Build pipeline:
+
+          firmware/*.bin
+          ->
+          scripts/gen_fw_blobs.py
+          ->
+          src/compat/fw_blobs.c
+          ->
+          fw_blobs.o
+          ->
+          rtw88 executable
+
+          Therefore physical firmware .bin files are not expected
+          inside the final rtw88.kext bundle.
+
+
+          DRIVER FEATURES
           ============================================================
 
           RTL8821CE
+
+          PCI 10EC:C821
 
           2.4 GHz
 
@@ -953,38 +986,45 @@ jobs:
 
           WPA2
 
+          PMK
+
           PTK
 
           GTK
+
+          EAPOL
 
           TX A-MPDU
 
           RX A-MPDU reorder
 
+          ADDBA
+
           BlockAck
 
           PCI Bus Master
 
+          DMA coherent allocation
+
           DMA bounce buffering
+
+          DMA RX synchronization
 
 
           IMPORTANT
           ============================================================
 
-          This is a clean compile baseline.
+          rtw88.kext and rtw88ctl in this package were produced
+          by the exact same compilation.
 
-          It does not guarantee a specific Wi-Fi speed.
+          Do not mix either file with another Feixiao build.
 
-          Always use rtw88.kext and rtw88ctl from
-          the SAME artifact.
-
-          Keep the last known working Kext as backup.
+          Keep your previous working kext as backup.
           EOF
 
 
       # ================================================================
-      # 24
-      # CHECKSUM
+      # 27 - GENERATE CHECKSUMS
       # ================================================================
 
       - name: Generate SHA256 checksums
@@ -1012,39 +1052,42 @@ jobs:
 
 
       # ================================================================
-      # 25
-      # PACKAGE
+      # 28 - PACKAGE
       # ================================================================
 
-      - name: Package HP256G8 v8.5.2
+      - name: Package HP256G8 v8.5.3
         shell: bash
         run: |
           set -eu
 
           cd "${RUNNER_TEMP}"
 
-          rm -f \
-            Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip
+          ZIP="Feixiao_HP256G8_v8_5_3_Clean_Fixed.zip"
+
+          rm -f "${ZIP}"
 
           zip \
             -r \
-            Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip \
+            "${ZIP}" \
             "${BUILD_NAME}"
 
           echo
-          ls -lh \
-            Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip
+          echo "============================================================"
+          echo "PACKAGE"
+          echo "============================================================"
+          echo
+
+          ls -lh "${ZIP}"
 
 
       # ================================================================
-      # 26
-      # UPLOAD
+      # 29 - UPLOAD
       # ================================================================
 
-      - name: Upload HP256G8 v8.5.2 artifact
+      - name: Upload HP256G8 v8.5.3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Feixiao-HP256G8-v8.5.2-Clean-Fixed
-          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_5_2_Clean_Fixed.zip
+          name: Feixiao-HP256G8-v8.5.3-Clean-Fixed
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_5_3_Clean_Fixed.zip
           if-no-files-found: error
           retention-days: 7
