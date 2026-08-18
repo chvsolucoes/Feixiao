@@ -1,0 +1,1085 @@
+name: Build HP256G8 RTL8821CE v8.6.3 Stable RX Performance
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+  RX_BATCH_COMMIT: b72076a7a7224102b870142f49584d431577fbc5
+  RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+  BUILD_NAME: Feixiao-HP256G8-v8.6.3-Stable-RX-Performance
+
+jobs:
+
+  build:
+
+    name: Build HP256G8 v8.6.3
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # ================================================================
+      # 01 - CHECKOUT STABLE FEIXIAO BASE
+      # ================================================================
+
+      - name: Checkout Feixiao stable base
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: ${{ env.FEIXIAO_REF }}
+          path: Feixiao
+          fetch-depth: 0
+          submodules: recursive
+
+
+      # ================================================================
+      # 02 - VALIDATE BASE
+      # ================================================================
+
+      - name: Validate Feixiao base
+        shell: bash
+        run: |
+          set -eu
+
+          ACTUAL="$(git -C Feixiao rev-parse HEAD)"
+
+          echo
+          echo "============================================================"
+          echo "FEIXIAO BASE"
+          echo "============================================================"
+          echo
+
+          echo "Expected:"
+          echo "${FEIXIAO_REF}"
+
+          echo
+          echo "Actual:"
+          echo "${ACTUAL}"
+
+          if [ "${ACTUAL}" != "${FEIXIAO_REF}" ]; then
+            echo "ERROR: wrong Feixiao base"
+            exit 1
+          fi
+
+          echo
+          echo "Stable base: OK"
+
+
+      # ================================================================
+      # 03 - VALIDATE MACKERNELSDK
+      # ================================================================
+
+      - name: Validate MacKernelSDK
+        shell: bash
+        run: |
+          set -eu
+
+          test -d Feixiao/MacKernelSDK
+          test -d Feixiao/MacKernelSDK/Headers
+
+          COUNT="$(
+            find Feixiao/MacKernelSDK/Headers \
+              -type f \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          echo
+          echo "MacKernelSDK headers: ${COUNT}"
+
+          if [ "${COUNT}" -lt 100 ]; then
+            echo "ERROR: MacKernelSDK incomplete"
+            exit 1
+          fi
+
+          git -C Feixiao/MacKernelSDK rev-parse HEAD
+
+
+      # ================================================================
+      # 04 - CLONE EXACT RTW88
+      # ================================================================
+
+      - name: Clone matching rtw88-stable
+        shell: bash
+        run: |
+          set -eu
+
+          rm -rf rtw88-stable
+
+          git clone \
+            https://github.com/thegwchr/rtw88-stable.git \
+            rtw88-stable
+
+          git \
+            -C rtw88-stable \
+            checkout \
+            "${RTW88_REF}"
+
+          ACTUAL="$(git -C rtw88-stable rev-parse HEAD)"
+
+          if [ "${ACTUAL}" != "${RTW88_REF}" ]; then
+            echo "ERROR: wrong rtw88-stable revision"
+            exit 1
+          fi
+
+          echo
+          echo "rtw88-stable: OK"
+
+
+      # ================================================================
+      # 05 - VERIFY STABLE RX PATH BEFORE CHANGE
+      # ================================================================
+
+      - name: Validate original stable RX path
+        shell: bash
+        run: |
+          set -eu
+
+          CPP="Feixiao/src/kext/RTW88PCIDevice.cpp"
+          HPP="Feixiao/src/kext/RTW88PCIDevice.hpp"
+
+          echo
+          echo "============================================================"
+          echo "STABLE RX PATH"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            '_iface->inputPacket(m, 0, IONetworkInterface::kInputOptionQueuePacket);' \
+            "${CPP}"
+
+          grep -q \
+            '_iface->flushInputQueue();' \
+            "${CPP}"
+
+          if grep -q \
+            'flushRxQueue' \
+            "${HPP}"
+          then
+            echo "ERROR: base already contains RX batching"
+            exit 1
+          fi
+
+          echo "Per-packet RX flush detected."
+          echo "Stable v8.5.3 behavior confirmed."
+
+
+      # ================================================================
+      # 06 - PRESERVE TX SETTINGS
+      # ================================================================
+
+      - name: Preserve stable TX backpressure
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q \
+            'kRTW88TxStallAvail = 96;' \
+            "${FILE}"
+
+          grep -q \
+            'kRTW88TxResumeAvail = 160;' \
+            "${FILE}"
+
+          echo
+          echo "============================================================"
+          echo "TX SETTINGS"
+          echo "============================================================"
+
+          echo "stall  = 96"
+          echo "resume = 160"
+          echo
+          echo "TX path intentionally unchanged."
+
+
+      # ================================================================
+      # 07 - PRESERVE SAFE WATCHDOG MODE
+      # ================================================================
+
+      - name: Preserve stable watchdog configuration
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/compat/rtw88_compat.c"
+
+          grep -q \
+            'bool rtw88_disable_watchdog_work = true;' \
+            "${FILE}"
+
+          if grep -q \
+            'bool rtw88_disable_watchdog_work = false;' \
+            "${FILE}"
+          then
+            echo "ERROR: unsafe watchdog configuration"
+            exit 1
+          fi
+
+          echo
+          echo "Full dynamic watchdog remains disabled."
+          echo "No v8.6.2 dynamic_rx_agg modification will be used."
+
+
+      # ================================================================
+      # 08 - PRESERVE RATE ADAPTATION
+      # ================================================================
+
+      - name: Validate firmware rate adaptation
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/compat/rtw88_compat.c"
+
+          grep -q \
+            'fix_rate = 0xFF' \
+            "${FILE}"
+
+          echo
+          echo "============================================================"
+          echo "RATE CONTROL"
+          echo "============================================================"
+
+          echo "Fixed 6 Mbps lock: OFF"
+          echo "Firmware rate adaptation: ON"
+
+
+      # ================================================================
+      # 09 - PRESERVE VHT 80 MHZ
+      # ================================================================
+
+      - name: Validate VHT 80 MHz support
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          grep -q \
+            '_connChanWidth = 80;' \
+            "${FILE}"
+
+          grep -q \
+            'NL80211_CHAN_WIDTH_80' \
+            "${FILE}"
+
+          grep -q \
+            'IEEE80211_STA_RX_BW_80' \
+            "${FILE}"
+
+          grep -q \
+            'chip80 && vhtWidth == 1 && vhtSeg0 != 0' \
+            "${FILE}"
+
+          echo
+          echo "============================================================"
+          echo "VHT"
+          echo "============================================================"
+
+          echo "5 GHz: OK"
+          echo "VHT 80 MHz: OK"
+          echo "STA RX BW 80: OK"
+
+
+      # ================================================================
+      # 10 - PRESERVE A-MPDU
+      # ================================================================
+
+      - name: Validate A-MPDU
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          grep -q \
+            'startTxAggregation' \
+            "${FILE}"
+
+          grep -q \
+            'sendAddbaRequest' \
+            "${FILE}"
+
+          grep -q \
+            'rxReorderInput' \
+            "${FILE}"
+
+          echo
+          echo "TX A-MPDU: OK"
+          echo "RX reorder: OK"
+
+
+      # ================================================================
+      # 11
+      #
+      # APPLY THE PROJECT'S OWN RX PERFORMANCE COMMIT
+      #
+      # This commit changes ONLY:
+      #
+      #   per-packet flush
+      #
+      # to
+      #
+      #   one flush per RX poll
+      #
+      # ================================================================
+
+      - name: Apply upstream RX batch performance fix
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "RX PERFORMANCE FIX"
+          echo "============================================================"
+          echo
+
+          cd Feixiao
+
+          git \
+            show \
+            --stat \
+            "${RX_BATCH_COMMIT}"
+
+          echo
+          echo "Checking cherry-pick..."
+
+          git \
+            cherry-pick \
+            --no-commit \
+            "${RX_BATCH_COMMIT}"
+
+          echo
+          echo "RX batching commit applied to working tree."
+
+
+      # ================================================================
+      # 12 - VALIDATE EXACT FILES MODIFIED
+      # ================================================================
+
+      - name: Validate RX patch scope
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao
+
+          echo
+          echo "============================================================"
+          echo "MODIFIED FILES"
+          echo "============================================================"
+
+          git diff \
+            --name-only \
+            HEAD
+
+          MODIFIED="$(
+            git diff \
+              --name-only \
+              HEAD \
+              | sort
+          )"
+
+          EXPECTED="$(
+            printf '%s\n' \
+              src/kext/RTW88IEEE80211.cpp \
+              src/kext/RTW88PCIDevice.cpp \
+              src/kext/RTW88PCIDevice.hpp \
+              | sort
+          )"
+
+          if [ "${MODIFIED}" != "${EXPECTED}" ]; then
+            echo
+            echo "ERROR:"
+            echo "RX patch changed unexpected files."
+            echo
+            echo "Expected:"
+            echo "${EXPECTED}"
+            echo
+            echo "Actual:"
+            echo "${MODIFIED}"
+            exit 1
+          fi
+
+          echo
+          echo "Patch scope: OK"
+
+
+      # ================================================================
+      # 13 - VALIDATE BATCHED RX IMPLEMENTATION
+      # ================================================================
+
+      - name: Validate batched RX implementation
+        shell: bash
+        run: |
+          set -eu
+
+          CPP="Feixiao/src/kext/RTW88PCIDevice.cpp"
+          HPP="Feixiao/src/kext/RTW88PCIDevice.hpp"
+          IEEE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          echo
+          echo "============================================================"
+          echo "BATCHED RX VALIDATION"
+          echo "============================================================"
+          echo
+
+          grep -q \
+            '_iface->inputPacket(m, 0, IONetworkInterface::kInputOptionQueuePacket);' \
+            "${CPP}"
+
+          grep -q \
+            '_rxQueued = true;' \
+            "${CPP}"
+
+          grep -q \
+            'void RTW88PCIDevice::flushRxQueue()' \
+            "${CPP}"
+
+          grep -q \
+            '_iface->flushInputQueue();' \
+            "${CPP}"
+
+          grep -q \
+            'flushRxQueue();' \
+            "${CPP}"
+
+          grep -q \
+            'void flushRxQueue();' \
+            "${HPP}"
+
+          grep -q \
+            '_rxQueued' \
+            "${HPP}"
+
+          grep -q \
+            '_parent->flushRxQueue();' \
+            "${IEEE}"
+
+          PER_PACKET_PATTERN="$(
+            awk '
+              /void RTW88PCIDevice::injectRxFrame\(mbuf_t m\)/ {
+                  active=1
+              }
+
+              active && /void RTW88PCIDevice::flushRxQueue\(\)/ {
+                  active=0
+              }
+
+              active && /_iface->flushInputQueue\(\);/ {
+                  count++
+              }
+
+              END {
+                  print count + 0
+              }
+            ' "${CPP}"
+          )"
+
+          echo "Per-packet flushes remaining inside injectRxFrame: ${PER_PACKET_PATTERN}"
+
+          if [ "${PER_PACKET_PATTERN}" -ne 0 ]; then
+            echo "ERROR: per-packet RX flush still exists"
+            exit 1
+          fi
+
+          echo
+          echo "RX queue batching: OK"
+          echo "Per-packet flush removed: OK"
+
+
+      # ================================================================
+      # 14 - VALIDATE NO DYNAMIC RX AGG HACK
+      # ================================================================
+
+      - name: Verify v8.6 panic change is absent
+        shell: bash
+        run: |
+          set -eu
+
+          MAIN="../rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c"
+
+          cd Feixiao
+
+          COUNT="$(
+            grep -c \
+              'rtw_hci_dynamic_rx_agg(rtwdev, true);' \
+              "${MAIN}" \
+              || true
+          )"
+
+          echo
+          echo "Forced dynamic RX aggregation calls: ${COUNT}"
+
+          if [ "${COUNT}" -ne 0 ]; then
+            echo "ERROR: unsafe v8.6 dynamic RX patch detected"
+            exit 1
+          fi
+
+          echo "v8.6 panic-producing change absent: OK"
+
+
+      # ================================================================
+      # 15 - VERIFY TX REMAINS 96/160 AFTER PATCH
+      # ================================================================
+
+      - name: Verify stable TX settings after patch
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q \
+            'kRTW88TxStallAvail = 96;' \
+            "${FILE}"
+
+          grep -q \
+            'kRTW88TxResumeAvail = 160;' \
+            "${FILE}"
+
+          echo "TX 96/160 preserved: OK"
+
+
+      # ================================================================
+      # 16 - VERIFY DMA SOURCE UNCHANGED
+      # ================================================================
+
+      - name: Verify DMA implementation unchanged
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao
+
+          if git diff \
+            HEAD \
+            -- src/kext/RTW88PCIDevice.cpp \
+            | grep -E \
+              '^[+-].*(allocCoherent|compat_dma|syncBounce|mapSingle|unmapSingle)'
+          then
+            echo "ERROR: RX optimization touched DMA code"
+            exit 1
+          fi
+
+          echo
+          echo "DMA implementation unchanged: OK"
+
+
+      # ================================================================
+      # 17 - SHOW RX PERFORMANCE DIFF
+      # ================================================================
+
+      - name: Show v8.6.3 source diff
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao
+
+          echo
+          echo "============================================================"
+          echo "V8.6.3 DIFF"
+          echo "============================================================"
+
+          git diff \
+            HEAD \
+            -- \
+            src/kext/RTW88IEEE80211.cpp \
+            src/kext/RTW88PCIDevice.cpp \
+            src/kext/RTW88PCIDevice.hpp
+
+
+      # ================================================================
+      # 18 - DOWNLOAD FIRMWARE
+      # ================================================================
+
+      - name: Download Realtek firmware
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao/firmware
+
+          FIRMWARE_FILES="
+          rtw8822b_fw.bin
+          rtw8822c_fw.bin
+          rtw8821c_fw.bin
+          rtw8821a_fw.bin
+          rtw8812a_fw.bin
+          rtw8814a_fw.bin
+          "
+
+          for FW in ${FIRMWARE_FILES}
+          do
+
+            if [ ! -s "${FW}" ]; then
+
+              echo "Downloading ${FW}"
+
+              curl \
+                --location \
+                --fail \
+                --retry 3 \
+                --retry-delay 2 \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/${FW}" \
+                --output "${FW}"
+
+            fi
+
+            if [ ! -s "${FW}" ]; then
+              echo "ERROR: firmware missing: ${FW}"
+              exit 1
+            fi
+
+            ls -lh "${FW}"
+
+          done
+
+
+      # ================================================================
+      # 19 - VALIDATE RTL8821C FIRMWARE
+      # ================================================================
+
+      - name: Validate RTL8821C firmware
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/firmware/rtw8821c_fw.bin"
+
+          test -s "${FILE}"
+
+          SIZE="$(stat -f "%z" "${FILE}")"
+
+          echo
+          echo "RTL8821C firmware: ${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 50000 ]; then
+            echo "ERROR: suspicious firmware size"
+            exit 1
+          fi
+
+
+      # ================================================================
+      # 20 - BUILD ENVIRONMENT
+      # ================================================================
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "MACOS"
+          echo "============================================================"
+
+          sw_vers
+
+          echo
+          echo "============================================================"
+          echo "XCODE"
+          echo "============================================================"
+
+          xcodebuild -version
+
+          echo
+          echo "============================================================"
+          echo "CLANG"
+          echo "============================================================"
+
+          clang --version
+
+          echo
+          echo "============================================================"
+          echo "MACKERNELSDK"
+          echo "============================================================"
+
+          git \
+            -C Feixiao/MacKernelSDK \
+            rev-parse \
+            HEAD
+
+
+      # ================================================================
+      # 21 - CLEAN
+      # ================================================================
+
+      - name: Clean build
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          make clean || true
+          rm -rf build/out || true
+
+
+      # ================================================================
+      # 22 - BUILD
+      # ================================================================
+
+      - name: Build HP256G8 v8.6.3
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "HP 256 G8"
+          echo "RTL8821CE"
+          echo "V8.6.3 STABLE RX PERFORMANCE"
+          echo "============================================================"
+          echo
+          echo "Base               : stable v8.5.3"
+          echo "5 GHz              : enabled"
+          echo "VHT 80 MHz         : enabled"
+          echo "Firmware RA        : enabled"
+          echo "TX A-MPDU          : enabled"
+          echo "RX A-MPDU          : enabled"
+          echo "RX queue batching  : enabled"
+          echo "Per-packet flush   : removed"
+          echo "TX thresholds      : 96/160 unchanged"
+          echo "Dynamic watchdog   : unchanged"
+          echo "DMA path           : unchanged"
+          echo
+
+          make all
+
+
+      # ================================================================
+      # 23 - VALIDATE GENERATED FIRMWARE
+      # ================================================================
+
+      - name: Validate embedded firmware source
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/compat/fw_blobs.c"
+
+          if [ ! -s "${FILE}" ]; then
+            echo "ERROR: fw_blobs.c missing"
+            exit 1
+          fi
+
+          SIZE="$(stat -f "%z" "${FILE}")"
+
+          echo
+          echo "fw_blobs.c: ${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 10000 ]; then
+            echo "ERROR: fw_blobs.c too small"
+            exit 1
+          fi
+
+
+      # ================================================================
+      # 24 - VERIFY OUTPUT
+      # ================================================================
+
+      - name: Verify build output
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          test -d "${KEXT}"
+          test -f "${KEXT}/Contents/Info.plist"
+          test -f "${KEXT}/Contents/MacOS/rtw88"
+          test -f "${CTL}"
+
+          echo
+          echo "rtw88.kext: OK"
+          echo "rtw88ctl: OK"
+
+
+      # ================================================================
+      # 25 - VALIDATE PLIST
+      # ================================================================
+
+      - name: Validate Info.plist
+        shell: bash
+        run: |
+          set -eu
+
+          PLIST="Feixiao/build/out/rtw88.kext/Contents/Info.plist"
+
+          plutil \
+            -lint \
+            "${PLIST}"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "${PLIST}"
+
+
+      # ================================================================
+      # 26 - VALIDATE MACH-O
+      # ================================================================
+
+      - name: Validate Mach-O
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          file "${BIN}"
+          file "${CTL}"
+
+          dwarfdump \
+            --uuid \
+            "${BIN}"
+
+
+      # ================================================================
+      # 27 - VALIDATE BINARY SIZE
+      # ================================================================
+
+      - name: Validate kext binary size
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+
+          SIZE="$(stat -f "%z" "${BIN}")"
+
+          echo
+          echo "Kext executable: ${SIZE} bytes"
+
+          if [ "${SIZE}" -lt 500000 ]; then
+            echo "ERROR: unexpectedly small kext"
+            exit 1
+          fi
+
+
+      # ================================================================
+      # 28 - PREPARE ARTIFACT
+      # ================================================================
+
+      - name: Prepare v8.6.3 artifact
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          rm -rf "${OUT}"
+          mkdir -p "${OUT}"
+
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "${OUT}/"
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "${OUT}/"
+
+          chmod +x \
+            "${OUT}/rtw88ctl"
+
+
+      # ================================================================
+      # 29 - BUILD INFO
+      # ================================================================
+
+      - name: Create build information
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          BASE="$(git -C Feixiao rev-parse HEAD)"
+          RTW="$(git -C rtw88-stable rev-parse HEAD)"
+          SDK="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
+
+          cat > "${OUT}/BUILD-INFO.txt" <<EOF
+          ============================================================
+          HP 256 G8
+          REALTEK RTL8821CE
+          FEIXIAO V8.6.3 STABLE RX PERFORMANCE
+          ============================================================
+
+
+          BASE
+          ============================================================
+
+          Feixiao stable:
+          ${BASE}
+
+          rtw88-stable:
+          ${RTW}
+
+          MacKernelSDK:
+          ${SDK}
+
+
+          PERFORMANCE PATCH
+          ============================================================
+
+          Upstream Feixiao RX batching commit:
+
+          ${RX_BATCH_COMMIT}
+
+
+          PROBLEM ADDRESSED
+          ============================================================
+
+          Stable baseline flushed the macOS input queue once
+          for EVERY received packet.
+
+          The upstream Feixiao performance commit documents that
+          per-packet flushing serialized RX delivery and roughly
+          halved download throughput relative to upload.
+
+
+          V8.6.3
+          ============================================================
+
+          RX packets are queued.
+
+          Input queue is flushed once per RX poll.
+
+          Reorder timer output is also flushed safely.
+
+
+          PRESERVED FROM STABLE BUILD
+          ============================================================
+
+          TX stall:
+          96
+
+          TX resume:
+          160
+
+          Full RF watchdog:
+          disabled
+
+          Forced dynamic RX aggregation:
+          NOT USED
+
+          DMA implementation:
+          unchanged
+
+          mbuf allocation:
+          unchanged
+
+          WPA2:
+          unchanged
+
+          VHT 80 MHz:
+          enabled
+
+          Firmware rate adaptation:
+          enabled
+
+          TX A-MPDU:
+          enabled
+
+          RX reorder:
+          enabled
+
+
+          PERFORMANCE TARGET
+          ============================================================
+
+          Target:
+          over 100 Mbps download and upload
+
+          on:
+          5 GHz
+          VHT 80 MHz
+          strong RSSI
+          suitable AP
+
+
+          IMPORTANT
+          ============================================================
+
+          No driver modification can honestly guarantee a specific
+          real-world throughput before testing.
+
+          Keep v8.5.3 as fallback.
+
+          If this build causes instability, revert immediately.
+
+          Always use rtw88.kext and rtw88ctl from the SAME artifact.
+          EOF
+
+
+      # ================================================================
+      # 30 - CHECKSUMS
+      # ================================================================
+
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          cd "${OUT}"
+
+          shasum \
+            -a 256 \
+            rtw88ctl \
+            > SHA256SUMS.txt
+
+          find \
+            rtw88.kext \
+            -type f \
+            -exec shasum -a 256 {} \; \
+            >> SHA256SUMS.txt
+
+          cat SHA256SUMS.txt
+
+
+      # ================================================================
+      # 31 - PACKAGE
+      # ================================================================
+
+      - name: Package HP256G8 v8.6.3
+        shell: bash
+        run: |
+          set -eu
+
+          cd "${RUNNER_TEMP}"
+
+          ZIP="Feixiao_HP256G8_v8_6_3_Stable_RX_Performance.zip"
+
+          rm -f "${ZIP}"
+
+          zip \
+            -r \
+            "${ZIP}" \
+            "${BUILD_NAME}"
+
+          ls -lh "${ZIP}"
+
+
+      # ================================================================
+      # 32 - UPLOAD
+      # ================================================================
+
+      - name: Upload HP256G8 v8.6.3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-HP256G8-v8.6.3-Stable-RX-Performance
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_6_3_Stable_RX_Performance.zip
+          if-no-files-found: error
+          retention-days: 7
