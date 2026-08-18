@@ -22,8 +22,7 @@ jobs:
     steps:
 
       # ================================================================
-      # 01
-      # EXACT STABLE FEIXIAO SOURCE
+      # 01 - CHECKOUT EXACT STABLE FEIXIAO
       # ================================================================
 
       - name: Checkout exact stable Feixiao
@@ -37,8 +36,7 @@ jobs:
 
 
       # ================================================================
-      # 02
-      # VERIFY EXACT FEIXIAO COMMIT
+      # 02 - VALIDATE FEIXIAO REVISION
       # ================================================================
 
       - name: Validate Feixiao revision
@@ -46,11 +44,7 @@ jobs:
         run: |
           set -eu
 
-          ACTUAL="$(
-            git \
-              -C Feixiao \
-              rev-parse HEAD
-          )"
+          ACTUAL="$(git -C Feixiao rev-parse HEAD)"
 
           echo
           echo "============================================================"
@@ -66,7 +60,6 @@ jobs:
           echo "${ACTUAL}"
 
           if [ "${ACTUAL}" != "${FEIXIAO_REF}" ]; then
-            echo
             echo "ERROR: wrong Feixiao revision"
             exit 1
           fi
@@ -76,8 +69,7 @@ jobs:
 
 
       # ================================================================
-      # 03
-      # MACKERNELSDK
+      # 03 - VALIDATE MACKERNELSDK
       # ================================================================
 
       - name: Validate MacKernelSDK
@@ -95,15 +87,10 @@ jobs:
             exit 1
           fi
 
-          SDK_COMMIT="$(
-            git \
-              -C Feixiao/MacKernelSDK \
-              rev-parse HEAD
-          )"
+          SDK_COMMIT="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
 
           HEADER_COUNT="$(
-            find \
-              Feixiao/MacKernelSDK/Headers \
+            find Feixiao/MacKernelSDK/Headers \
               -type f \
               | wc -l \
               | tr -d ' '
@@ -123,7 +110,6 @@ jobs:
           echo "${HEADER_COUNT}"
 
           if [ "${HEADER_COUNT}" -lt 100 ]; then
-            echo
             echo "ERROR: MacKernelSDK incomplete"
             exit 1
           fi
@@ -133,8 +119,7 @@ jobs:
 
 
       # ================================================================
-      # 04
-      # EXACT RTW88-STABLE SOURCE
+      # 04 - CLONE EXACT RTW88-STABLE
       # ================================================================
 
       - name: Clone exact rtw88-stable
@@ -153,11 +138,7 @@ jobs:
             checkout \
             "${RTW88_REF}"
 
-          ACTUAL="$(
-            git \
-              -C rtw88-stable \
-              rev-parse HEAD
-          )"
+          ACTUAL="$(git -C rtw88-stable rev-parse HEAD)"
 
           echo
           echo "============================================================"
@@ -173,7 +154,6 @@ jobs:
           echo "${ACTUAL}"
 
           if [ "${ACTUAL}" != "${RTW88_REF}" ]; then
-            echo
             echo "ERROR: wrong rtw88-stable revision"
             exit 1
           fi
@@ -183,8 +163,7 @@ jobs:
 
 
       # ================================================================
-      # 05
-      # VALIDATE REQUIRED FILES
+      # 05 - VALIDATE REQUIRED SOURCE FILES
       # ================================================================
 
       - name: Validate required source files
@@ -211,9 +190,8 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "REQUIRED SOURCE FILES"
+          echo "REQUIRED FILES"
           echo "============================================================"
-          echo
 
           for FILE in ${FILES}
           do
@@ -229,11 +207,10 @@ jobs:
 
 
       # ================================================================
-      # 06
-      # SAVE DATAPATH HASHES BEFORE BUILD CHANGES
+      # 06 - SNAPSHOT DATAPATH HASHES
       # ================================================================
 
-      - name: Snapshot stable datapath
+      - name: Snapshot stable datapath hashes
         shell: bash
         run: |
           set -eu
@@ -257,9 +234,7 @@ jobs:
 
           for FILE in ${FILES}
           do
-            shasum \
-              -a 256 \
-              "${FILE}" \
+            shasum -a 256 "${FILE}" \
               >> /tmp/v855-before.sha256
           done
 
@@ -272,8 +247,7 @@ jobs:
 
 
       # ================================================================
-      # 07
-      # VERIFY THE PREVIOUS PANIC CHANGES ARE ABSENT
+      # 07 - REJECT V8.6 PANIC MODIFICATIONS
       # ================================================================
 
       - name: Reject v8.6 panic-producing modifications
@@ -298,26 +272,22 @@ jobs:
             exit 1
           fi
 
-          if grep -q \
-            -A 1 \
+          if grep -A 2 \
             'if (rtw88_disable_watchdog_work)' \
             "${MAIN}" \
             | grep -q \
               'rtw_hci_dynamic_rx_agg(rtwdev, true)'
           then
-            echo "ERROR: v8.6.2 forced RX aggregation detected"
+            echo "ERROR: v8.6.2 forced dynamic RX aggregation detected"
             exit 1
           fi
 
           echo "RX batching: ABSENT"
           echo "Forced dynamic RX aggregation: ABSENT"
-          echo
-          echo "Known panic modifications are not present."
 
 
       # ================================================================
-      # 08
-      # VERIFY ORIGINAL SAFE RX DELIVERY
+      # 08 - VALIDATE STABLE RX DELIVERY
       # ================================================================
 
       - name: Validate stable RX delivery
@@ -348,20 +318,11 @@ jobs:
             "${FILE}"
 
           echo
-          echo "============================================================"
-          echo "RX DELIVERY"
-          echo "============================================================"
-          echo
-
-          echo "inputPacket: stable"
-          echo "per-packet flush: stable"
-          echo "mbuf validation: stable"
-          echo "RX batching: disabled"
+          echo "Stable RX path: OK"
 
 
       # ================================================================
-      # 09
-      # VERIFY ORIGINAL SAFE DMA
+      # 09 - VALIDATE STABLE DMA
       # ================================================================
 
       - name: Validate stable DMA
@@ -371,37 +332,17 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
 
-          grep -q \
-            'compat_dma_map' \
-            "${FILE}"
-
-          grep -q \
-            'compat_dma_unmap' \
-            "${FILE}"
-
-          grep -q \
-            'compat_dma_sync_cpu' \
-            "${FILE}"
-
-          grep -q \
-            'syncBounceForCpu' \
-            "${FILE}"
+          grep -q 'compat_dma_map' "${FILE}"
+          grep -q 'compat_dma_unmap' "${FILE}"
+          grep -q 'compat_dma_sync_cpu' "${FILE}"
+          grep -q 'syncBounceForCpu' "${FILE}"
 
           echo
-          echo "============================================================"
-          echo "DMA"
-          echo "============================================================"
-          echo
-
-          echo "DMA map: stable"
-          echo "DMA unmap: stable"
-          echo "DMA sync: stable"
-          echo "Bounce DMA: stable"
+          echo "Stable DMA path: OK"
 
 
       # ================================================================
-      # 10
-      # VERIFY ORIGINAL TX FLOW CONTROL
+      # 10 - VALIDATE STABLE TX THRESHOLDS
       # ================================================================
 
       - name: Validate stable TX backpressure
@@ -420,20 +361,12 @@ jobs:
             "${FILE}"
 
           echo
-          echo "============================================================"
-          echo "TX FLOW CONTROL"
-          echo "============================================================"
-          echo
-
-          echo "Stall : 96"
-          echo "Resume: 160"
-          echo
-          echo "TX thresholds unchanged."
+          echo "TX stall : 96"
+          echo "TX resume: 160"
 
 
       # ================================================================
-      # 11
-      # VERIFY STABLE WATCHDOG
+      # 11 - VALIDATE SAFE WATCHDOG
       # ================================================================
 
       - name: Validate watchdog safe mode
@@ -448,18 +381,11 @@ jobs:
             "${FILE}"
 
           echo
-          echo "============================================================"
-          echo "WATCHDOG"
-          echo "============================================================"
-          echo
-
-          echo "Full RF dynamic watchdog: disabled"
-          echo "Known stable behavior retained."
+          echo "RF watchdog safe mode: OK"
 
 
       # ================================================================
-      # 12
-      # VERIFY VHT80 NEGOTIATION CODE
+      # 12 - VALIDATE VHT 80 MHZ
       # ================================================================
 
       - name: Validate VHT 80 MHz negotiation
@@ -469,17 +395,9 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          grep -q \
-            '_connChanWidth = 20;' \
-            "${FILE}"
-
-          grep -q \
-            '_connChanWidth = 40;' \
-            "${FILE}"
-
-          grep -q \
-            '_connChanWidth = 80;' \
-            "${FILE}"
+          grep -q '_connChanWidth = 20;' "${FILE}"
+          grep -q '_connChanWidth = 40;' "${FILE}"
+          grep -q '_connChanWidth = 80;' "${FILE}"
 
           grep -q \
             'NL80211_CHAN_WIDTH_80' \
@@ -494,20 +412,11 @@ jobs:
             "${FILE}"
 
           echo
-          echo "============================================================"
-          echo "CHANNEL NEGOTIATION"
-          echo "============================================================"
-          echo
-
-          echo "HT20 parser : present"
-          echo "HT40 parser : present"
-          echo "VHT80 parser: present"
-          echo "Runtime chandef logging: present"
+          echo "VHT80 negotiation code: OK"
 
 
       # ================================================================
-      # 13
-      # VERIFY STA 80 MHZ PATH
+      # 13 - VALIDATE STA VHT80
       # ================================================================
 
       - name: Validate STA VHT80 configuration
@@ -530,14 +439,11 @@ jobs:
             "${FILE}"
 
           echo
-          echo "STA BW80: present"
-          echo "HT capabilities: present"
-          echo "VHT capabilities: present"
+          echo "STA VHT80 configuration: OK"
 
 
       # ================================================================
-      # 14
-      # VERIFY A-MPDU / BLOCKACK
+      # 14 - VALIDATE A-MPDU / BLOCKACK
       # ================================================================
 
       - name: Validate A-MPDU and BlockAck
@@ -547,45 +453,19 @@ jobs:
 
           FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
 
-          grep -q \
-            'startTxAggregation' \
-            "${FILE}"
-
-          grep -q \
-            'sendAddbaRequest' \
-            "${FILE}"
-
-          grep -q \
-            'sendAddbaResponse' \
-            "${FILE}"
-
-          grep -q \
-            'handleBackAction' \
-            "${FILE}"
-
-          grep -q \
-            '_txBaActive' \
-            "${FILE}"
-
-          grep -q \
-            'rxReorderInput' \
-            "${FILE}"
+          grep -q 'startTxAggregation' "${FILE}"
+          grep -q 'sendAddbaRequest' "${FILE}"
+          grep -q 'sendAddbaResponse' "${FILE}"
+          grep -q 'handleBackAction' "${FILE}"
+          grep -q '_txBaActive' "${FILE}"
+          grep -q 'rxReorderInput' "${FILE}"
 
           echo
-          echo "============================================================"
-          echo "A-MPDU / BLOCKACK"
-          echo "============================================================"
-          echo
-
-          echo "TX ADDBA request : present"
-          echo "RX ADDBA response: present"
-          echo "TX BlockAck state: present"
-          echo "RX reorder       : present"
+          echo "A-MPDU / BlockAck code: OK"
 
 
       # ================================================================
-      # 15
-      # VERIFY RATE ADAPTATION
+      # 15 - VALIDATE RATE ADAPTATION
       # ================================================================
 
       - name: Validate firmware rate adaptation
@@ -613,23 +493,11 @@ jobs:
             "${MAIN}"
 
           echo
-          echo "============================================================"
-          echo "RATE ADAPTATION"
-          echo "============================================================"
-          echo
-
-          echo "Fixed legacy rate: disabled"
-          echo "VHT 1SS RA       : present"
-          echo "80 MHz RA        : present"
+          echo "Firmware rate adaptation: OK"
 
 
       # ================================================================
-      # 16
-      # ENABLE O2 ONLY
-      #
-      # Same compiler strategy as v8.5.4.
-      #
-      # NO DRIVER LOGIC CHANGE.
+      # 16 - ENABLE O2
       # ================================================================
 
       - name: Enable O2 optimization
@@ -643,7 +511,9 @@ jobs:
             -- '-O2' \
             "${FILE}"
           then
+
             echo "O2 already present."
+
           else
 
             COUNT="$(
@@ -673,18 +543,13 @@ jobs:
             "${FILE}"
 
           echo
-          echo "============================================================"
-          echo "COMPILER"
-          echo "============================================================"
-          echo
-
+          echo "Compiler:"
           echo "-O2"
           echo "-fno-strict-aliasing"
 
 
       # ================================================================
-      # 17
-      # DO NOT ALLOW AGGRESSIVE OPTIMIZATION
+      # 17 - REJECT AGGRESSIVE COMPILER FLAGS
       # ================================================================
 
       - name: Reject unsafe compiler flags
@@ -694,36 +559,26 @@ jobs:
 
           FILE="Feixiao/Makefile"
 
-          if grep -q \
-            -- '-O3' \
-            "${FILE}"
-          then
+          if grep -q -- '-O3' "${FILE}"; then
             echo "ERROR: O3 not allowed"
             exit 1
           fi
 
-          if grep -q \
-            -- '-Ofast' \
-            "${FILE}"
-          then
+          if grep -q -- '-Ofast' "${FILE}"; then
             echo "ERROR: Ofast not allowed"
             exit 1
           fi
 
-          if grep -q \
-            -- '-ffast-math' \
-            "${FILE}"
-          then
+          if grep -q -- '-ffast-math' "${FILE}"; then
             echo "ERROR: fast-math not allowed"
             exit 1
           fi
 
-          echo "Compiler safety validation: OK"
+          echo "Compiler safety: OK"
 
 
       # ================================================================
-      # 18
-      # VERIFY DATAPATH SOURCE DID NOT CHANGE
+      # 18 - VERIFY DRIVER DATAPATH UNCHANGED
       # ================================================================
 
       - name: Verify datapath unchanged
@@ -750,12 +605,8 @@ jobs:
 
           for FILE in ${FILES}
           do
-
-            shasum \
-              -a 256 \
-              "${FILE}" \
+            shasum -a 256 "${FILE}" \
               >> /tmp/v855-after.sha256
-
           done
 
           if ! cmp \
@@ -777,30 +628,14 @@ jobs:
             cat /tmp/v855-after.sha256
 
             exit 1
-
           fi
 
           echo
-          echo "============================================================"
-          echo "DATAPATH VALIDATION"
-          echo "============================================================"
-          echo
-
-          echo "RX     : byte-for-byte stable"
-          echo "TX     : byte-for-byte stable"
-          echo "DMA    : byte-for-byte stable"
-          echo "WPA2   : byte-for-byte stable"
-          echo "A-MPDU : byte-for-byte stable"
-          echo "Watchdog: byte-for-byte stable"
+          echo "Datapath byte-for-byte unchanged."
 
 
       # ================================================================
-      # 19
-      # CREATE USERSPACE DIAGNOSTIC SCRIPT
-      #
-      # IMPORTANT:
-      # This script does NOT run in kernel space.
-      # It cannot change driver behavior.
+      # 19 - CREATE RTW88 DIAGNOSTIC SCRIPT
       # ================================================================
 
       - name: Create rtw88diag diagnostic tool
@@ -838,28 +673,18 @@ jobs:
           echo "------------------------------------------------------------"
           echo "RTW88 STATUS"
           echo "------------------------------------------------------------"
-          echo
 
           if [ -x "${CTL}" ]; then
             "${CTL}" status || true
           else
-            echo "rtw88ctl not found/executable:"
+            echo "rtw88ctl not found:"
             echo "${CTL}"
           fi
 
           echo
           echo "------------------------------------------------------------"
-          echo "NETWORK INTERFACES"
-          echo "------------------------------------------------------------"
-          echo
-
-          ifconfig || true
-
-          echo
-          echo "------------------------------------------------------------"
           echo "DEFAULT ROUTE"
           echo "------------------------------------------------------------"
-          echo
 
           route -n get default 2>/dev/null || true
 
@@ -867,7 +692,6 @@ jobs:
           echo "------------------------------------------------------------"
           echo "RTW88 KEXT"
           echo "------------------------------------------------------------"
-          echo
 
           kmutil showloaded 2>/dev/null \
             | grep -i rtw88 \
@@ -875,92 +699,88 @@ jobs:
 
           echo
           echo "------------------------------------------------------------"
-          echo "CHANNEL WIDTH / VHT"
+          echo "CHANNEL WIDTH"
           echo "------------------------------------------------------------"
-          echo
 
           log show \
-            --last 15m \
+            --last 20m \
             --style compact \
             --predicate \
-            'process == "kernel" AND eventMessage CONTAINS[c] "connected chandef"' \
+            'process == "kernel"' \
             2>/dev/null \
+            | grep -i \
+              'connected chandef' \
             | tail -50 \
             || true
 
           echo
           echo "------------------------------------------------------------"
-          echo "AUTHENTICATION / ASSOCIATION"
+          echo "AUTH / ASSOC / WPA2"
           echo "------------------------------------------------------------"
-          echo
 
           log show \
-            --last 15m \
+            --last 20m \
             --style compact \
             --predicate \
-            'process == "kernel" AND senderImagePath CONTAINS[c] "rtw88"' \
+            'process == "kernel"' \
             2>/dev/null \
             | grep -Ei \
-            'auth|assoc|WPA2|EAPOL|connected' \
-            | tail -150 \
+              'rtw88.*(auth|assoc|WPA2|EAPOL|connected)' \
+            | tail -200 \
             || true
 
           echo
           echo "------------------------------------------------------------"
           echo "A-MPDU / BLOCKACK / ADDBA"
           echo "------------------------------------------------------------"
-          echo
 
           log show \
-            --last 15m \
+            --last 20m \
             --style compact \
             --predicate \
             'process == "kernel"' \
             2>/dev/null \
             | grep -Ei \
-            'rtw88.*(ADDBA|BlockAck|A-MPDU|AMPDU|BA active|aggregation)' \
-            | tail -150 \
+              'rtw88.*(ADDBA|BlockAck|A-MPDU|AMPDU|aggregation|BA)' \
+            | tail -200 \
             || true
 
           echo
           echo "------------------------------------------------------------"
-          echo "PCI / DMA ERRORS"
+          echo "PCI / DMA / TX"
           echo "------------------------------------------------------------"
-          echo
 
           log show \
-            --last 15m \
+            --last 20m \
             --style compact \
             --predicate \
             'process == "kernel"' \
             2>/dev/null \
             | grep -Ei \
-            'rtw88.*(pci|dma|timeout|bus timeout|ring|descriptor|ENOSPC|stall)' \
-            | tail -200 \
+              'rtw88.*(pci|dma|timeout|bus timeout|ring|descriptor|ENOSPC|stall|tx)' \
+            | tail -300 \
             || true
 
           echo
           echo "------------------------------------------------------------"
           echo "DEAUTH / DISASSOC"
           echo "------------------------------------------------------------"
-          echo
 
           log show \
-            --last 15m \
+            --last 20m \
             --style compact \
             --predicate \
             'process == "kernel"' \
             2>/dev/null \
             | grep -Ei \
-            'rtw88.*(deauth|disassoc|reason=)' \
-            | tail -100 \
+              'rtw88.*(deauth|disassoc|reason=)' \
+            | tail -150 \
             || true
 
           echo
           echo "------------------------------------------------------------"
-          echo "RECENT RTW88 KERNEL LOG"
+          echo "RECENT RTW88 LOG"
           echo "------------------------------------------------------------"
-          echo
 
           log show \
             --last 10m \
@@ -969,12 +789,12 @@ jobs:
             'process == "kernel"' \
             2>/dev/null \
             | grep -i rtw88 \
-            | tail -300 \
+            | tail -500 \
             || true
 
           echo
           echo "============================================================"
-          echo "END OF DIAGNOSTIC"
+          echo "END"
           echo "============================================================"
           DIAG
 
@@ -982,15 +802,11 @@ jobs:
 
           bash -n diagnostic/rtw88diag.sh
 
-          echo
           echo "rtw88diag.sh: OK"
 
 
       # ================================================================
-      # 20
-      # CREATE SPEED TEST COLLECTION SCRIPT
-      #
-      # Run this immediately after the browser Speedtest.
+      # 20 - CREATE AFTER-SPEEDTEST SCRIPT
       # ================================================================
 
       - name: Create post-speedtest collector
@@ -1022,17 +838,65 @@ jobs:
 
             echo
             echo "============================================================"
-            echo "RTW88 LOG"
+            echo "CHANNEL WIDTH"
             echo "============================================================"
 
             log show \
-              --last 5m \
+              --last 10m \
+              --style compact \
+              --predicate \
+              'process == "kernel"' \
+              2>/dev/null \
+              | grep -i \
+                'connected chandef' \
+              | tail -50 \
+              || true
+
+            echo
+            echo "============================================================"
+            echo "ADDBA / BLOCKACK"
+            echo "============================================================"
+
+            log show \
+              --last 10m \
+              --style compact \
+              --predicate \
+              'process == "kernel"' \
+              2>/dev/null \
+              | grep -Ei \
+                'rtw88.*(ADDBA|BlockAck|A-MPDU|AMPDU|aggregation|BA)' \
+              | tail -200 \
+              || true
+
+            echo
+            echo "============================================================"
+            echo "PCI / DMA / TX"
+            echo "============================================================"
+
+            log show \
+              --last 10m \
+              --style compact \
+              --predicate \
+              'process == "kernel"' \
+              2>/dev/null \
+              | grep -Ei \
+                'rtw88.*(pci|dma|timeout|ring|descriptor|stall|tx)' \
+              | tail -300 \
+              || true
+
+            echo
+            echo "============================================================"
+            echo "COMPLETE RTW88 LOG"
+            echo "============================================================"
+
+            log show \
+              --last 10m \
               --style compact \
               --predicate \
               'process == "kernel"' \
               2>/dev/null \
               | grep -i rtw88 \
-              | tail -500 \
+              | tail -700 \
               || true
 
           } > "${OUT}"
@@ -1050,8 +914,7 @@ jobs:
 
 
       # ================================================================
-      # 21
-      # DOWNLOAD REALTEK FIRMWARE
+      # 21 - DOWNLOAD FIRMWARE
       # ================================================================
 
       - name: Download Realtek firmware
@@ -1075,7 +938,6 @@ jobs:
 
             if [ ! -s "${FW}" ]; then
 
-              echo
               echo "Downloading ${FW}"
 
               curl \
@@ -1089,7 +951,6 @@ jobs:
             fi
 
             if [ ! -s "${FW}" ]; then
-              echo
               echo "ERROR: firmware missing:"
               echo "${FW}"
               exit 1
@@ -1102,8 +963,7 @@ jobs:
 
 
       # ================================================================
-      # 22
-      # VERIFY RTL8821C FIRMWARE
+      # 22 - VALIDATE RTL8821C FIRMWARE
       # ================================================================
 
       - name: Validate RTL8821C firmware
@@ -1118,29 +978,23 @@ jobs:
             exit 1
           fi
 
-          SIZE="$(
-            stat \
-              -f "%z" \
-              "${FILE}"
-          )"
+          SIZE="$(stat -f "%z" "${FILE}")"
 
           echo
-          echo "RTL8821C firmware:"
+          echo "RTL8821C firmware size:"
           echo "${SIZE} bytes"
 
           if [ "${SIZE}" -lt 50000 ]; then
-            echo
-            echo "ERROR: suspicious firmware size"
+            echo "ERROR: suspicious RTL8821C firmware size"
             exit 1
           fi
 
           echo
-          echo "Firmware: OK"
+          echo "RTL8821C firmware: OK"
 
 
       # ================================================================
-      # 23
-      # BUILD ENVIRONMENT
+      # 23 - SHOW BUILD ENVIRONMENT
       # ================================================================
 
       - name: Show build environment
@@ -1152,36 +1006,29 @@ jobs:
           echo "============================================================"
           echo "MACOS"
           echo "============================================================"
-
           sw_vers
 
           echo
           echo "============================================================"
           echo "XCODE"
           echo "============================================================"
-
           xcodebuild -version
 
           echo
           echo "============================================================"
           echo "CLANG"
           echo "============================================================"
-
           clang --version
 
           echo
           echo "============================================================"
           echo "MACKERNELSDK"
           echo "============================================================"
-
-          git \
-            -C Feixiao/MacKernelSDK \
-            rev-parse HEAD
+          git -C Feixiao/MacKernelSDK rev-parse HEAD
 
 
       # ================================================================
-      # 24
-      # CLEAN BUILD
+      # 24 - CLEAN
       # ================================================================
 
       - name: Clean previous build
@@ -1191,18 +1038,14 @@ jobs:
           set -eu
 
           make clean || true
-
-          rm -rf \
-            build/out \
-            || true
+          rm -rf build/out || true
 
           echo
           echo "Clean: OK"
 
 
       # ================================================================
-      # 25
-      # BUILD
+      # 25 - BUILD
       # ================================================================
 
       - name: Build HP256G8 v8.5.5
@@ -1219,7 +1062,6 @@ jobs:
           echo "============================================================"
           echo
 
-          echo "Stable driver source : unchanged"
           echo "RX                   : unchanged"
           echo "TX                   : unchanged"
           echo "DMA                  : unchanged"
@@ -1229,15 +1071,14 @@ jobs:
           echo "TX thresholds        : 96 / 160"
           echo "RX batching          : disabled"
           echo "Forced RX aggregation: disabled"
-          echo "Compiler             : O2"
+          echo "Compiler             : -O2"
           echo
 
           make all
 
 
       # ================================================================
-      # 26
-      # VERIFY GENERATED FIRMWARE BLOB SOURCE
+      # 26 - VALIDATE EMBEDDED FIRMWARE
       # ================================================================
 
       - name: Validate embedded firmware
@@ -1248,31 +1089,24 @@ jobs:
           FILE="Feixiao/src/compat/fw_blobs.c"
 
           if [ ! -s "${FILE}" ]; then
-            echo
             echo "ERROR: fw_blobs.c missing"
             exit 1
           fi
 
-          SIZE="$(
-            stat \
-              -f "%z" \
-              "${FILE}"
-          )"
+          SIZE="$(stat -f "%z" "${FILE}")"
 
           echo
           echo "fw_blobs.c:"
           echo "${SIZE} bytes"
 
           if [ "${SIZE}" -lt 10000 ]; then
-            echo
-            echo "ERROR: firmware source unexpectedly small"
+            echo "ERROR: embedded firmware source too small"
             exit 1
           fi
 
 
       # ================================================================
-      # 27
-      # VERIFY BUILD OUTPUT
+      # 27 - VERIFY BUILD OUTPUT
       # ================================================================
 
       - name: Verify v8.5.5 output
@@ -1283,17 +1117,10 @@ jobs:
           KEXT="Feixiao/build/out/rtw88.kext"
           CTL="Feixiao/build/out/rtw88ctl"
 
-          test -d \
-            "${KEXT}"
-
-          test -f \
-            "${KEXT}/Contents/Info.plist"
-
-          test -f \
-            "${KEXT}/Contents/MacOS/rtw88"
-
-          test -f \
-            "${CTL}"
+          test -d "${KEXT}"
+          test -f "${KEXT}/Contents/Info.plist"
+          test -f "${KEXT}/Contents/MacOS/rtw88"
+          test -f "${CTL}"
 
           echo
           echo "rtw88.kext: OK"
@@ -1301,8 +1128,7 @@ jobs:
 
 
       # ================================================================
-      # 28
-      # VALIDATE PLIST
+      # 28 - VALIDATE INFO.PLIST
       # ================================================================
 
       - name: Validate Info.plist
@@ -1317,7 +1143,7 @@ jobs:
             "${PLIST}"
 
           echo
-          echo "Bundle ID:"
+          echo "Bundle Identifier:"
 
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleIdentifier" \
@@ -1325,8 +1151,7 @@ jobs:
 
 
       # ================================================================
-      # 29
-      # VALIDATE MACH-O
+      # 29 - VALIDATE MACH-O
       # ================================================================
 
       - name: Validate Mach-O
@@ -1343,9 +1168,7 @@ jobs:
 
           echo
           echo "UUID:"
-          dwarfdump \
-            --uuid \
-            "${BIN}"
+          dwarfdump --uuid "${BIN}"
 
           echo
           echo "rtw88ctl:"
@@ -1354,7 +1177,20 @@ jobs:
 
       # ================================================================
       # 30
-      # CHECK IMPORTANT BINARY STRINGS
+      # VALIDATE DIAGNOSTIC MARKERS
+      #
+      # FIXED VERSION:
+      #
+      # Do NOT use:
+      #
+      # strings binary | grep -q
+      #
+      # because grep -q closes the pipe as soon as it finds the string.
+      # Xcode 26 llvm-strings then reports:
+      #
+      # strings: failed to flush output
+      #
+      # We first write all strings to a file and search that file.
       # ================================================================
 
       - name: Validate diagnostic markers in kext
@@ -1363,6 +1199,7 @@ jobs:
           set -eu
 
           BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+          STRINGS_FILE="${RUNNER_TEMP}/rtw88-v855-strings.txt"
 
           echo
           echo "============================================================"
@@ -1370,48 +1207,130 @@ jobs:
           echo "============================================================"
           echo
 
-          if strings "${BIN}" \
-            | grep -q \
-              'connected chandef'
+          if [ ! -f "${BIN}" ]; then
+            echo "ERROR: rtw88 binary not found"
+            exit 1
+          fi
+
+          echo "Extracting binary strings..."
+
+          strings \
+            "${BIN}" \
+            > "${STRINGS_FILE}"
+
+          if [ ! -s "${STRINGS_FILE}" ]; then
+            echo "ERROR: strings output is empty"
+            exit 1
+          fi
+
+          echo
+          echo "Extracted string lines:"
+          wc -l "${STRINGS_FILE}"
+
+          echo
+          echo "------------------------------------------------------------"
+          echo "CONNECTED CHANNEL WIDTH"
+          echo "------------------------------------------------------------"
+
+          if grep -F \
+            'connected chandef' \
+            "${STRINGS_FILE}" \
+            > /dev/null
           then
-            echo "[OK] connected chandef"
+            echo "[OK] connected chandef marker"
           else
             echo "ERROR: connected chandef marker missing"
             exit 1
           fi
 
-          if strings "${BIN}" \
-            | grep -q \
-              'WPA2 connected'
+          echo
+          echo "------------------------------------------------------------"
+          echo "WPA2"
+          echo "------------------------------------------------------------"
+
+          if grep -F \
+            'WPA2 connected' \
+            "${STRINGS_FILE}" \
+            > /dev/null
           then
             echo "[OK] WPA2 connected marker"
           else
-            echo "ERROR: WPA2 marker missing"
+            echo "ERROR: WPA2 connected marker missing"
             exit 1
           fi
 
-          if strings "${BIN}" \
-            | grep -qi \
-              'ADDBA'
+          echo
+          echo "------------------------------------------------------------"
+          echo "MBUF SAFETY"
+          echo "------------------------------------------------------------"
+
+          if grep -F \
+            'dropping bogus mbuf' \
+            "${STRINGS_FILE}" \
+            > /dev/null
+          then
+            echo "[OK] bogus mbuf protection marker"
+          else
+            echo "ERROR: mbuf safety marker missing"
+            exit 1
+          fi
+
+          echo
+          echo "------------------------------------------------------------"
+          echo "RTL8821CE"
+          echo "------------------------------------------------------------"
+
+          if grep -i \
+            'RTL8821CE' \
+            "${STRINGS_FILE}" \
+            > /dev/null
+          then
+            echo "[OK] RTL8821CE marker"
+          else
+            echo "ERROR: RTL8821CE marker missing"
+            exit 1
+          fi
+
+          echo
+          echo "------------------------------------------------------------"
+          echo "ADDBA"
+          echo "------------------------------------------------------------"
+
+          if grep -i \
+            'ADDBA' \
+            "${STRINGS_FILE}" \
+            > /dev/null
           then
             echo "[OK] ADDBA marker"
           else
-            echo "WARNING: ADDBA text marker not found"
+            echo "[INFO] ADDBA literal not found."
+            echo "This does NOT fail the build."
           fi
 
-          if strings "${BIN}" \
-            | grep -q \
-              'pci bus timeout'
+          echo
+          echo "------------------------------------------------------------"
+          echo "PCI BUS TIMEOUT"
+          echo "------------------------------------------------------------"
+
+          if grep -i \
+            'pci bus timeout' \
+            "${STRINGS_FILE}" \
+            > /dev/null
           then
-            echo "[OK] PCI timeout marker"
+            echo "[OK] PCI timeout diagnostic marker"
           else
-            echo "PCI timeout text not found in binary"
+            echo "[INFO] PCI timeout literal not found."
+            echo "This does NOT fail the build."
           fi
+
+          echo
+          echo "============================================================"
+          echo "V8.5.5 BINARY VALIDATION PASSED"
+          echo "============================================================"
 
 
       # ================================================================
-      # 31
-      # PREPARE ARTIFACT
+      # 31 - PREPARE ARTIFACT
       # ================================================================
 
       - name: Prepare v8.5.5 artifact
@@ -1421,11 +1340,8 @@ jobs:
 
           OUT="${RUNNER_TEMP}/${BUILD_NAME}"
 
-          rm -rf \
-            "${OUT}"
-
-          mkdir -p \
-            "${OUT}"
+          rm -rf "${OUT}"
+          mkdir -p "${OUT}"
 
           cp -R \
             Feixiao/build/out/rtw88.kext \
@@ -1456,10 +1372,12 @@ jobs:
             Feixiao/Makefile \
             "${OUT}/Makefile.build-used"
 
+          echo
+          echo "Artifact prepared."
+
 
       # ================================================================
-      # 32
-      # BUILD INFO
+      # 32 - CREATE BUILD INFO
       # ================================================================
 
       - name: Create v8.5.5 build info
@@ -1469,23 +1387,9 @@ jobs:
 
           OUT="${RUNNER_TEMP}/${BUILD_NAME}"
 
-          FEIXIAO_HASH="$(
-            git \
-              -C Feixiao \
-              rev-parse HEAD
-          )"
-
-          RTW88_HASH="$(
-            git \
-              -C rtw88-stable \
-              rev-parse HEAD
-          )"
-
-          SDK_HASH="$(
-            git \
-              -C Feixiao/MacKernelSDK \
-              rev-parse HEAD
-          )"
+          FEIXIAO_HASH="$(git -C Feixiao rev-parse HEAD)"
+          RTW88_HASH="$(git -C rtw88-stable rev-parse HEAD)"
+          SDK_HASH="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
 
           KEXT_UUID="$(
             dwarfdump \
@@ -1503,43 +1407,63 @@ jobs:
           ============================================================
 
 
-          SOURCE
+          FEIXIAO
           ============================================================
 
-          Feixiao:
           ${FEIXIAO_HASH}
 
-          rtw88-stable:
+
+          RTW88-STABLE
+          ============================================================
+
           ${RTW88_HASH}
 
-          MacKernelSDK:
+
+          MACKERNELSDK
+          ============================================================
+
           ${SDK_HASH}
 
-          Kext UUID:
+
+          KEXT UUID
+          ============================================================
+
           ${KEXT_UUID}
 
 
           PURPOSE
           ============================================================
 
-          Diagnose the approximately:
-
-          30 Mbps download
-          sub-1 Mbps upload
-
-          condition without modifying the stable driver datapath.
+          Diagnose low RTL8821CE throughput while preserving the
+          stable v8.5.3 driver datapath.
 
 
-          DRIVER BEHAVIOR
+          CURRENT OBSERVED PERFORMANCE
+          ============================================================
+
+          Download:
+          approximately 30 Mbps
+
+          Upload:
+          below 1 Mbps
+
+          Target:
+          above 100 Mbps where hardware and radio conditions permit.
+
+
+          STABLE DATAPATH
           ============================================================
 
           RX:
           unchanged
 
-          per-packet flushInputQueue:
-          unchanged
+          RX per-packet flush:
+          preserved
 
           RX batching:
+          disabled
+
+          Forced dynamic RX aggregation:
           disabled
 
           TX:
@@ -1554,25 +1478,19 @@ jobs:
           DMA:
           unchanged
 
-          bounce buffers:
-          unchanged
-
           mbuf safety:
           unchanged
 
-          forced dynamic RX aggregation:
-          disabled
-
-          full RF watchdog:
-          disabled
+          RF watchdog:
+          stable bypass preserved
 
           WPA2:
           unchanged
 
-          VHT:
+          A-MPDU:
           unchanged
 
-          A-MPDU:
+          VHT:
           unchanged
 
 
@@ -1580,6 +1498,7 @@ jobs:
           ============================================================
 
           -O2
+
           -fno-strict-aliasing
 
 
@@ -1590,59 +1509,42 @@ jobs:
 
           Collects:
 
-          driver status
-          channel width
+          connected chandef
           authentication
           association
           WPA2
-          A-MPDU / ADDBA
+          A-MPDU
+          BlockAck
+          ADDBA
           PCI errors
           DMA errors
-          bus timeouts
           TX stalls
+          bus timeouts
           deauthentication
-          recent rtw88 kernel log
+          recent rtw88 logs
 
 
           after-speedtest.sh
 
-          Run immediately after a Speedtest.
-
-          It creates a timestamped text report containing:
-
-          rtw88ctl status
-          recent rtw88 kernel messages
-
-
-          GOAL
-          ============================================================
-
-          Determine whether the <100 Mbps limitation is caused by:
-
-          20/40/80 MHz negotiation
-          VHT association
-          BlockAck/A-MPDU
-          TX path
-          PCI/DMA stalls
-          excessive reconnect/deauth behavior
+          Run immediately after performing Speedtest.
 
 
           IMPORTANT
           ============================================================
 
-          This version intentionally does NOT attempt another
-          risky performance datapath modification.
+          v8.6.2 forced dynamic RX aggregation is NOT included.
 
-          It is designed to identify the exact bottleneck before
-          applying the next targeted fix.
+          v8.6.3 RX batching is NOT included.
+
+          Those experimental paths caused kernel panic on the target
+          HP 256 G8 / RTL8821CE configuration.
 
           Keep the known-working stable build available as fallback.
           EOF
 
 
       # ================================================================
-      # 33
-      # CREATE TEST INSTRUCTIONS
+      # 33 - TEST INSTRUCTIONS
       # ================================================================
 
       - name: Create test instructions
@@ -1654,112 +1556,160 @@ jobs:
 
           cat > "${OUT}/TESTE.txt" <<'EOF'
           ============================================================
-          TESTE V8.5.5
+          HP 256 G8
+          RTL8821CE
+          V8.5.5 TESTE
           ============================================================
 
 
-          1. Instale rtw88.kext.
+          IMPORTANTE
+          ============================================================
 
-          2. Reinicie o macOS.
-
-          3. Abra o Terminal.
-
-          4. Entre na pasta deste pacote.
-
-          Exemplo:
-
-          cd ~/Downloads/Feixiao-HP256G8-v8.5.5-PHY-TX-Diagnostic
+          Utilize somente o Wi-Fi 5 GHz para o teste.
 
 
-          5. Faça um scan:
+          1. INSTALAÇÃO
+          ============================================================
+
+          Copie:
+
+          rtw88.kext
+
+          para:
+
+          EFI/OC/Kexts
+
+
+          Não deixe duas cópias da rtw88.kext.
+
+
+          Utilize também o rtw88ctl presente neste mesmo pacote.
+
+
+          Reinicie o computador.
+
+
+          2. SCAN
+          ============================================================
+
+          Abra o Terminal.
+
+          Entre na pasta onde estão os arquivos.
+
+          Execute:
 
           ./rtw88ctl scan
 
 
-          6. Conecte SOMENTE no Wi-Fi 5 GHz.
+          3. CONEXÃO 5 GHZ
+          ============================================================
 
-          Use:
+          Conecte somente na rede 5 GHz:
 
           ./rtw88ctl connect "NOME_DA_REDE_5G"
 
-          Não coloque a senha na linha de comando se puder evitá-lo.
+          Evite colocar a senha diretamente no histórico do Terminal
+          quando houver outra forma de fornecê-la.
 
 
-          7. Confira:
+          4. STATUS
+          ============================================================
+
+          Execute:
 
           ./rtw88ctl status
 
 
-          O Channel deverá ser superior a 14.
+          Verifique se:
 
-          Exemplo:
+          State:
+          connected
+
+          Channel:
+          maior que 14
+
+
+          Exemplo esperado para 5 GHz:
 
           Channel: 36
 
 
-          8. Execute o diagnóstico:
+          5. DIAGNÓSTICO
+          ============================================================
+
+          Execute:
 
           sudo ./rtw88diag.sh ./rtw88ctl
 
 
-          9. Faça UM Speedtest completo.
-
-
-          10. Imediatamente depois:
-
-          sudo ./after-speedtest.sh ./rtw88ctl
-
-
-          11. O script criará um arquivo:
-
-          rtw88-speedtest-AAAAMMDD-HHMMSS.txt
-
-
-          12. Envie esse TXT para análise.
-
-
-          PRINCIPAL INFORMAÇÃO A PROCURAR
-          ============================================================
-
-          Procure no resultado por:
+          Procure principalmente:
 
           connected chandef:
 
 
-          Exemplos:
+          Possibilidades:
 
 
           connected chandef: 20 MHz
 
-          Isso indica um forte limitador PHY.
+          Forte indicação de limitação de largura de canal.
 
 
           connected chandef: 40 MHz
 
-          Ainda abaixo da capacidade máxima 802.11ac da placa.
+          Largura intermediária.
 
 
           connected chandef: 80 MHz
 
-          A largura de canal está correta e devemos investigar
-          TX/A-MPDU/rate control/PCI.
+          Largura correta para VHT80.
 
 
-          NÃO USE
+          6. SPEEDTEST
           ============================================================
 
-          v8.6.2 dynamic RX aggregation
-
-          v8.6.3 RX batching
+          Faça UM Speedtest completo.
 
 
-          Esses caminhos apresentaram kernel panic neste hardware.
+          Anote:
+
+          Download
+
+          Upload
+
+          Ping
+
+
+          7. LOG DEPOIS DO SPEEDTEST
+          ============================================================
+
+          Imediatamente depois execute:
+
+          sudo ./after-speedtest.sh ./rtw88ctl
+
+
+          Ele criará um arquivo parecido com:
+
+          rtw88-speedtest-20260817-230000.txt
+
+
+          Envie esse arquivo para análise.
+
+
+          NÃO UTILIZAR
+          ============================================================
+
+          v8.6.2
+
+          v8.6.3
+
+
+          Esses caminhos apresentaram kernel panic no equipamento alvo.
           EOF
 
 
       # ================================================================
-      # 34
-      # SHA256
+      # 34 - SHA256
       # ================================================================
 
       - name: Generate SHA256 checksums
@@ -1789,8 +1739,7 @@ jobs:
 
 
       # ================================================================
-      # 35
-      # PACKAGE
+      # 35 - PACKAGE ZIP
       # ================================================================
 
       - name: Package HP256G8 v8.5.5
@@ -1802,8 +1751,7 @@ jobs:
 
           ZIP="Feixiao_HP256G8_v8_5_5_PHY_TX_Diagnostic.zip"
 
-          rm -f \
-            "${ZIP}"
+          rm -f "${ZIP}"
 
           zip \
             -r \
@@ -1812,17 +1760,15 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "PACKAGE"
+          echo "V8.5.5 PACKAGE"
           echo "============================================================"
           echo
 
-          ls -lh \
-            "${ZIP}"
+          ls -lh "${ZIP}"
 
 
       # ================================================================
-      # 36
-      # UPLOAD
+      # 36 - UPLOAD ARTIFACT
       # ================================================================
 
       - name: Upload HP256G8 v8.5.5 artifact
