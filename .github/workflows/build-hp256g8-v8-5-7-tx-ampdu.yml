@@ -1,0 +1,1617 @@
+name: Build HP256G8 RTL8821CE v8.5.7 TX AMPDU Fix
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+  RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+  BUILD_NAME: Feixiao-HP256G8-v8.5.7-Stable-HT40-TX-AMPDU
+
+jobs:
+
+  build:
+
+    name: Build HP256G8 v8.5.7
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # ================================================================
+      # 01 - CHECKOUT EXACT STABLE BASE
+      # ================================================================
+
+      - name: Checkout exact stable Feixiao
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: ${{ env.FEIXIAO_REF }}
+          path: Feixiao
+          fetch-depth: 1
+          submodules: recursive
+
+
+      # ================================================================
+      # 02 - VALIDATE FEIXIAO
+      # ================================================================
+
+      - name: Validate Feixiao revision
+        shell: bash
+        run: |
+          set -eu
+
+          ACTUAL="$(git -C Feixiao rev-parse HEAD)"
+
+          echo
+          echo "============================================================"
+          echo "FEIXIAO"
+          echo "============================================================"
+          echo "Expected: ${FEIXIAO_REF}"
+          echo "Actual  : ${ACTUAL}"
+
+          if [ "${ACTUAL}" != "${FEIXIAO_REF}" ]; then
+            echo "ERROR: wrong Feixiao revision"
+            exit 1
+          fi
+
+          echo
+          echo "Feixiao stable base: OK"
+
+
+      # ================================================================
+      # 03 - MACKERNELSDK
+      # ================================================================
+
+      - name: Validate MacKernelSDK
+        shell: bash
+        run: |
+          set -eu
+
+          test -d Feixiao/MacKernelSDK
+          test -d Feixiao/MacKernelSDK/Headers
+
+          SDK_COMMIT="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
+
+          HEADER_COUNT="$(
+            find Feixiao/MacKernelSDK/Headers \
+              -type f \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          echo
+          echo "MacKernelSDK:"
+          echo "${SDK_COMMIT}"
+          echo
+          echo "Headers: ${HEADER_COUNT}"
+
+          if [ "${HEADER_COUNT}" -lt 100 ]; then
+            echo "ERROR: MacKernelSDK incomplete"
+            exit 1
+          fi
+
+
+      # ================================================================
+      # 04 - RTW88-STABLE
+      # ================================================================
+
+      - name: Clone exact rtw88-stable
+        shell: bash
+        run: |
+          set -eu
+
+          rm -rf rtw88-stable
+
+          git clone \
+            https://github.com/thegwchr/rtw88-stable.git \
+            rtw88-stable
+
+          git \
+            -C rtw88-stable \
+            checkout \
+            "${RTW88_REF}"
+
+          ACTUAL="$(git -C rtw88-stable rev-parse HEAD)"
+
+          if [ "${ACTUAL}" != "${RTW88_REF}" ]; then
+            echo "ERROR: wrong rtw88-stable revision"
+            exit 1
+          fi
+
+          echo "rtw88-stable: OK"
+
+
+      # ================================================================
+      # 05 - REQUIRED FILES
+      # ================================================================
+
+      - name: Validate required files
+        shell: bash
+        run: |
+          set -eu
+
+          FILES="
+          Feixiao/Makefile
+          Feixiao/src/kext/RTW88IEEE80211.cpp
+          Feixiao/src/kext/RTW88IEEE80211.hpp
+          Feixiao/src/kext/RTW88PCIDevice.cpp
+          Feixiao/src/kext/RTW88PCIDevice.hpp
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          Feixiao/ctl/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          "
+
+          for FILE in ${FILES}
+          do
+            if [ ! -f "${FILE}" ]; then
+              echo "ERROR: missing ${FILE}"
+              exit 1
+            fi
+
+            echo "[OK] ${FILE}"
+          done
+
+
+      # ================================================================
+      # 06 - ORIGINAL COMPILER FLAGS
+      #
+      # No -O2.
+      # ================================================================
+
+      - name: Preserve original compiler behavior
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/Makefile"
+
+          if grep -q -- '-O2' "${FILE}"; then
+            echo "ERROR: O2 detected"
+            exit 1
+          fi
+
+          if grep -q -- '-O3' "${FILE}"; then
+            echo "ERROR: O3 detected"
+            exit 1
+          fi
+
+          if grep -q -- '-Ofast' "${FILE}"; then
+            echo "ERROR: Ofast detected"
+            exit 1
+          fi
+
+          echo "Original stable compiler flags: OK"
+
+
+      # ================================================================
+      # 07 - SNAPSHOT PROTECTED DATAPATH FILES
+      # ================================================================
+
+      - name: Snapshot protected stable sources
+        shell: bash
+        run: |
+          set -eu
+
+          FILES="
+          Feixiao/src/kext/RTW88PCIDevice.cpp
+          Feixiao/src/kext/RTW88PCIDevice.hpp
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/rx.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
+          "
+
+          rm -f /tmp/v857-protected-before.sha256
+
+          for FILE in ${FILES}
+          do
+            shasum -a 256 "${FILE}" \
+              >> /tmp/v857-protected-before.sha256
+          done
+
+          cat /tmp/v857-protected-before.sha256
+
+
+      # ================================================================
+      # 08 - VERIFY RX PATH
+      #
+      # Do not repeat v8.6.3.
+      # ================================================================
+
+      - name: Validate stable RX
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q \
+            '_iface->inputPacket(m, 0, IONetworkInterface::kInputOptionQueuePacket);' \
+            "${FILE}"
+
+          grep -q \
+            '_iface->flushInputQueue();' \
+            "${FILE}"
+
+          grep -q \
+            'mbuf_pkthdr_len' \
+            "${FILE}"
+
+          grep -q \
+            'dropping bogus mbuf' \
+            "${FILE}"
+
+          if grep -q 'flushRxQueue' "${FILE}"; then
+            echo "ERROR: RX batching detected"
+            exit 1
+          fi
+
+          echo
+          echo "RX path: stable"
+
+
+      # ================================================================
+      # 09 - VERIFY DMA
+      # ================================================================
+
+      - name: Validate stable DMA
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q 'compat_dma_map' "${FILE}"
+          grep -q 'compat_dma_unmap' "${FILE}"
+          grep -q 'compat_dma_sync_cpu' "${FILE}"
+          grep -q 'syncBounceForCpu' "${FILE}"
+
+          echo "DMA path: unchanged"
+
+
+      # ================================================================
+      # 10 - VERIFY TX THRESHOLDS
+      # ================================================================
+
+      - name: Validate stable TX thresholds
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          grep -q \
+            'kRTW88TxStallAvail = 96;' \
+            "${FILE}"
+
+          grep -q \
+            'kRTW88TxResumeAvail = 160;' \
+            "${FILE}"
+
+          echo
+          echo "TX stall : 96"
+          echo "TX resume: 160"
+
+
+      # ================================================================
+      # 11 - VERIFY WATCHDOG
+      # ================================================================
+
+      - name: Validate stable watchdog
+        shell: bash
+        run: |
+          set -eu
+
+          COMPAT="Feixiao/src/compat/rtw88_compat.c"
+          MAIN="rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c"
+
+          grep -q \
+            'bool rtw88_disable_watchdog_work = true;' \
+            "${COMPAT}"
+
+          if grep -A 2 \
+            'if (rtw88_disable_watchdog_work)' \
+            "${MAIN}" \
+            | grep \
+              'rtw_hci_dynamic_rx_agg(rtwdev, true);' \
+              > /dev/null
+          then
+            echo "ERROR: unsafe forced RX aggregation detected"
+            exit 1
+          fi
+
+          echo "Watchdog safe baseline: OK"
+
+
+      # ================================================================
+      # 12 - VALIDATE ORIGINAL ADDBA IMPLEMENTATION
+      # ================================================================
+
+      - name: Validate existing TX BlockAck implementation
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          echo
+          echo "============================================================"
+          echo "TX A-MPDU BASELINE"
+          echo "============================================================"
+
+          grep -q \
+            'void RTW88IEEE80211::startTxAggregation()' \
+            "${FILE}"
+
+          grep -q \
+            'sendAddbaRequest(_baTid);' \
+            "${FILE}"
+
+          grep -q \
+            'case WLAN_ACTION_ADDBA_RESP:' \
+            "${FILE}"
+
+          grep -q \
+            '_txBaActive = true;' \
+            "${FILE}"
+
+          grep -q \
+            'IEEE80211_TX_CTL_AMPDU' \
+            "${FILE}"
+
+          echo "startTxAggregation : OK"
+          echo "ADDBA request      : OK"
+          echo "ADDBA response     : OK"
+          echo "_txBaActive        : OK"
+          echo "TX AMPDU descriptor: OK"
+
+
+      # ================================================================
+      # 13
+      # APPLY V8.5.6 SAFE 5GHZ HT40 CAP
+      #
+      # Same known-stable change as v8.5.6.
+      # ================================================================
+
+      - name: Reapply v8.5.6 stable 40 MHz cap
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          OLD='if (chip80 && vhtWidth == 1 && vhtSeg0 != 0) {'
+          NEW='if (false && chip80 && vhtWidth == 1 && vhtSeg0 != 0) {'
+
+          COUNT="$(
+            grep -F \
+              -c \
+              "${OLD}" \
+              "${FILE}" \
+              || true
+          )"
+
+          if [ "${COUNT}" -ne 1 ]; then
+            echo "ERROR: VHT80 condition not found exactly once"
+            exit 1
+          fi
+
+          sed -i '' \
+            's/if (chip80 && vhtWidth == 1 && vhtSeg0 != 0) {/if (false \&\& chip80 \&\& vhtWidth == 1 \&\& vhtSeg0 != 0) {/' \
+            "${FILE}"
+
+          grep -F \
+            "${NEW}" \
+            "${FILE}" \
+            > /dev/null
+
+          echo
+          echo "5 GHz 40 MHz stable cap: APPLIED"
+
+
+      # ================================================================
+      # 14
+      # V8.5.7 TX A-MPDU FIX
+      #
+      # Existing behavior:
+      #
+      # One ADDBA request after WPA2.
+      #
+      # If that request/response is lost, TX AMPDU remains disabled.
+      #
+      # New behavior:
+      #
+      # While QoS is active and TX BA is still inactive,
+      # retry one ADDBA request every 64 QoS data frames.
+      #
+      # Once _txBaActive becomes true, retries stop automatically.
+      #
+      # No timer.
+      # No new workloop.
+      # No RX changes.
+      # No DMA changes.
+      # ================================================================
+
+      - name: Add controlled TX ADDBA retry
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+          TMP="/tmp/RTW88IEEE80211-v857.cpp"
+
+          echo
+          echo "============================================================"
+          echo "V8.5.7 CONTROLLED ADDBA RETRY"
+          echo "============================================================"
+          echo
+
+          MARKER='if (qos && _txBaActive)'
+
+          COUNT="$(
+            grep -F \
+              -c \
+              "${MARKER}" \
+              "${FILE}" \
+              || true
+          )"
+
+          echo "TX AMPDU activation points: ${COUNT}"
+
+          if [ "${COUNT}" -ne 1 ]; then
+            echo "ERROR: TX AMPDU activation point is not unique"
+            exit 1
+          fi
+
+          awk '
+          BEGIN {
+              inserted = 0
+          }
+
+          /^[[:space:]]*if \(qos && _txBaActive\)$/ {
+              if (inserted != 0)
+                  exit 71
+
+              print "\t/*"
+              print "\t * v8.5.7: controlled uplink BlockAck retry."
+              print "\t *"
+              print "\t * startTxAggregation() sends the first ADDBA immediately"
+              print "\t * after WPA2 completes.  If that management exchange is"
+              print "\t * lost, the original code never tries again and every"
+              print "\t * subsequent QoS frame remains non-A-MPDU."
+              print "\t *"
+              print "\t * Retry only while TX BA is inactive, once every 64 QoS"
+              print "\t * frames.  As soon as a valid ADDBA response sets"
+              print "\t * _txBaActive=true, this path becomes dormant."
+              print "\t */"
+              print "\tif (qos && !_txBaActive && ((_dataSeq & 0x003f) == 1)) {"
+              print "\t\tIOLog(\"rtw88: TX ADDBA retry tid=%u dataSeq=%u dialog=%u\\n\","
+              print "\t\t      _baTid, _dataSeq, _baDialog);"
+              print "\t\tsendAddbaRequest(_baTid);"
+              print "\t}"
+              print ""
+              print "\tif (qos && _txBaActive)"
+
+              inserted = 1
+              next
+          }
+
+          {
+              print
+          }
+
+          END {
+              if (inserted != 1)
+                  exit 72
+          }
+          ' "${FILE}" > "${TMP}"
+
+          STATUS=$?
+
+          if [ "${STATUS}" -ne 0 ]; then
+            echo "ERROR: ADDBA retry transformation failed"
+            rm -f "${TMP}"
+            exit 1
+          fi
+
+          if [ ! -s "${TMP}" ]; then
+            echo "ERROR: transformed source is empty"
+            exit 1
+          fi
+
+          mv "${TMP}" "${FILE}"
+
+          echo
+          echo "Result:"
+          echo
+
+          grep -n \
+            -A 25 \
+            -B 8 \
+            'v8.5.7: controlled uplink BlockAck retry' \
+            "${FILE}"
+
+
+      # ================================================================
+      # 15
+      # IMPROVE ADDBA RESPONSE LOGGING ONLY
+      #
+      # No behavior change.
+      # ================================================================
+
+      - name: Add TX ADDBA response diagnostics
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          OLD='IOLog("rtw88: TX ADDBA accepted (tid=%u) — uplink A-MPDU on\n", tid);'
+          NEW='IOLog("rtw88: TX ADDBA accepted (tid=%u dialog=%u buf=%u) — uplink A-MPDU on\n", tid, b[2], (unsigned)((param >> 6) & 0x3ff));'
+
+          COUNT="$(
+            grep -F \
+              -c \
+              "${OLD}" \
+              "${FILE}" \
+              || true
+          )"
+
+          if [ "${COUNT}" -ne 1 ]; then
+            echo
+            echo "INFO:"
+            echo "Exact old acceptance log not matched."
+            echo "Behavior patch is already complete."
+            echo "Leaving acceptance log unchanged."
+
+          else
+
+            perl -0pi -e \
+              's/IOLog\("rtw88: TX ADDBA accepted \(tid=%u\) — uplink A-MPDU on\\n", tid\);/IOLog("rtw88: TX ADDBA accepted (tid=%u dialog=%u buf=%u) — uplink A-MPDU on\\n", tid, b[2], (unsigned)((param >> 6) \& 0x3ff));/' \
+              "${FILE}"
+
+          fi
+
+          echo
+          echo "ADDBA diagnostics prepared."
+
+
+      # ================================================================
+      # 16
+      # VALIDATE V8.5.7 SOURCE
+      # ================================================================
+
+      - name: Validate v8.5.7 TX AMPDU patch
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          echo
+          echo "============================================================"
+          echo "V8.5.7 VALIDATION"
+          echo "============================================================"
+          echo
+
+          RETRY_COUNT="$(
+            grep -F \
+              -c \
+              'if (qos && !_txBaActive && ((_dataSeq & 0x003f) == 1)) {' \
+              "${FILE}" \
+              || true
+          )"
+
+          SEND_COUNT="$(
+            grep -F \
+              -c \
+              'sendAddbaRequest(_baTid);' \
+              "${FILE}" \
+              || true
+          )"
+
+          ACTIVE_COUNT="$(
+            grep -F \
+              -c \
+              '_txBaActive = true;' \
+              "${FILE}" \
+              || true
+          )"
+
+          AMPDU_COUNT="$(
+            grep -F \
+              -c \
+              'info->flags |= IEEE80211_TX_CTL_AMPDU;' \
+              "${FILE}" \
+              || true
+          )"
+
+          echo "Retry branch       : ${RETRY_COUNT}"
+          echo "ADDBA send calls   : ${SEND_COUNT}"
+          echo "BA activation      : ${ACTIVE_COUNT}"
+          echo "TX AMPDU flag      : ${AMPDU_COUNT}"
+
+          if [ "${RETRY_COUNT}" -ne 1 ]; then
+            echo "ERROR: controlled retry branch invalid"
+            exit 1
+          fi
+
+          if [ "${SEND_COUNT}" -lt 2 ]; then
+            echo "ERROR: expected initial + retry ADDBA paths"
+            exit 1
+          fi
+
+          if [ "${ACTIVE_COUNT}" -lt 1 ]; then
+            echo "ERROR: BA activation path missing"
+            exit 1
+          fi
+
+          if [ "${AMPDU_COUNT}" -ne 1 ]; then
+            echo "ERROR: TX AMPDU marking path invalid"
+            exit 1
+          fi
+
+          echo
+          echo "TX A-MPDU retry path: OK"
+
+
+      # ================================================================
+      # 17
+      # VALIDATE HT40 CAP STILL PRESENT
+      # ================================================================
+
+      - name: Validate stable 5GHz 40 MHz cap
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          grep -F \
+            'if (false && chip80 && vhtWidth == 1 && vhtSeg0 != 0) {' \
+            "${FILE}" \
+            > /dev/null
+
+          grep -F \
+            'if (chip40 && htStaWidth && (sco == 1 || sco == 3)) {' \
+            "${FILE}" \
+            > /dev/null
+
+          grep -F \
+            '_connChanWidth = 40;' \
+            "${FILE}" \
+            > /dev/null
+
+          echo
+          echo "5GHz 40MHz stable configuration: OK"
+
+
+      # ================================================================
+      # 18
+      # VERIFY PROTECTED SOURCES UNCHANGED
+      # ================================================================
+
+      - name: Verify protected datapath unchanged
+        shell: bash
+        run: |
+          set -eu
+
+          FILES="
+          Feixiao/src/kext/RTW88PCIDevice.cpp
+          Feixiao/src/kext/RTW88PCIDevice.hpp
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/rx.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
+          "
+
+          rm -f /tmp/v857-protected-after.sha256
+
+          for FILE in ${FILES}
+          do
+            shasum -a 256 "${FILE}" \
+              >> /tmp/v857-protected-after.sha256
+          done
+
+          if ! cmp \
+            -s \
+            /tmp/v857-protected-before.sha256 \
+            /tmp/v857-protected-after.sha256
+          then
+
+            echo "ERROR: protected stable datapath changed"
+
+            echo
+            echo "BEFORE:"
+            cat /tmp/v857-protected-before.sha256
+
+            echo
+            echo "AFTER:"
+            cat /tmp/v857-protected-after.sha256
+
+            exit 1
+          fi
+
+          echo
+          echo "RX       : unchanged"
+          echo "DMA      : unchanged"
+          echo "PCI      : unchanged"
+          echo "Watchdog : unchanged"
+          echo "TX rings : unchanged"
+
+
+      # ================================================================
+      # 19
+      # VERIFY PATCH SCOPE
+      # ================================================================
+
+      - name: Validate changed files
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao
+
+          MODIFIED="$(
+            git diff \
+              --name-only
+          )"
+
+          COUNT="$(
+            git diff \
+              --name-only \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          echo
+          echo "Modified files:"
+          echo "${MODIFIED}"
+
+          if [ "${COUNT}" -ne 1 ]; then
+            echo "ERROR: expected exactly one modified Feixiao source file"
+            exit 1
+          fi
+
+          if [ "${MODIFIED}" != "src/kext/RTW88IEEE80211.cpp" ]; then
+            echo "ERROR: unexpected source modified"
+            exit 1
+          fi
+
+
+      # ================================================================
+      # 20
+      # SHOW EXACT DIFF
+      # ================================================================
+
+      - name: Show exact v8.5.7 diff
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "V8.5.7 SOURCE DIFF"
+          echo "============================================================"
+          echo
+
+          git \
+            -C Feixiao \
+            diff \
+            -- \
+            src/kext/RTW88IEEE80211.cpp
+
+
+      # ================================================================
+      # 21
+      # DOWNLOAD FIRMWARE
+      # ================================================================
+
+      - name: Download Realtek firmware
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao/firmware
+
+          FIRMWARE_FILES="
+          rtw8822b_fw.bin
+          rtw8822c_fw.bin
+          rtw8821c_fw.bin
+          rtw8821a_fw.bin
+          rtw8812a_fw.bin
+          rtw8814a_fw.bin
+          "
+
+          for FW in ${FIRMWARE_FILES}
+          do
+
+            if [ ! -s "${FW}" ]; then
+
+              echo "Downloading ${FW}"
+
+              curl \
+                --location \
+                --fail \
+                --retry 3 \
+                --retry-delay 2 \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/${FW}" \
+                --output "${FW}"
+
+            fi
+
+            if [ ! -s "${FW}" ]; then
+              echo "ERROR: missing firmware ${FW}"
+              exit 1
+            fi
+
+            ls -lh "${FW}"
+
+          done
+
+
+      # ================================================================
+      # 22
+      # VALIDATE RTL8821C FIRMWARE
+      # ================================================================
+
+      - name: Validate RTL8821C firmware
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/firmware/rtw8821c_fw.bin"
+
+          test -s "${FILE}"
+
+          SIZE="$(stat -f "%z" "${FILE}")"
+
+          echo
+          echo "RTL8821C firmware size: ${SIZE}"
+
+          if [ "${SIZE}" -lt 50000 ]; then
+            echo "ERROR: suspicious firmware size"
+            exit 1
+          fi
+
+
+      # ================================================================
+      # 23
+      # BUILD ENVIRONMENT
+      # ================================================================
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "MACOS"
+          echo "============================================================"
+
+          sw_vers
+
+          echo
+          echo "============================================================"
+          echo "XCODE"
+          echo "============================================================"
+
+          xcodebuild -version
+
+          echo
+          echo "============================================================"
+          echo "CLANG"
+          echo "============================================================"
+
+          clang --version
+
+          echo
+          echo "============================================================"
+          echo "MACKERNELSDK"
+          echo "============================================================"
+
+          git -C Feixiao/MacKernelSDK rev-parse HEAD
+
+
+      # ================================================================
+      # 24
+      # CLEAN
+      # ================================================================
+
+      - name: Clean previous build
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          make clean || true
+          rm -rf build/out || true
+
+
+      # ================================================================
+      # 25
+      # BUILD
+      # ================================================================
+
+      - name: Build HP256G8 v8.5.7
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+
+          echo
+          echo "============================================================"
+          echo "HP 256 G8 / RTL8821CE"
+          echo "V8.5.7 STABLE HT40 + TX A-MPDU"
+          echo "============================================================"
+          echo
+
+          echo "Base                    : v8.5.3"
+          echo "5 GHz max width         : 40 MHz"
+          echo "80 MHz retune           : disabled"
+          echo "TX ADDBA initial        : enabled"
+          echo "TX ADDBA retry          : every 64 QoS frames"
+          echo "Retry stops after BA    : yes"
+          echo "TX AMPDU flag           : original mechanism"
+          echo "TX thresholds           : 96 / 160"
+          echo "RX path                 : unchanged"
+          echo "RX batching             : disabled"
+          echo "DMA                     : unchanged"
+          echo "Watchdog                : unchanged"
+          echo "Forced dynamic RX agg   : disabled"
+          echo "Compiler -O2            : NOT USED"
+          echo
+
+          make all
+
+
+      # ================================================================
+      # 26
+      # VALIDATE EMBEDDED FIRMWARE
+      # ================================================================
+
+      - name: Validate embedded firmware
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/compat/fw_blobs.c"
+
+          if [ ! -s "${FILE}" ]; then
+            echo "ERROR: fw_blobs.c missing"
+            exit 1
+          fi
+
+          SIZE="$(stat -f "%z" "${FILE}")"
+
+          if [ "${SIZE}" -lt 10000 ]; then
+            echo "ERROR: fw_blobs.c unexpectedly small"
+            exit 1
+          fi
+
+          echo "fw_blobs.c size: ${SIZE}"
+
+
+      # ================================================================
+      # 27
+      # VERIFY BUILD
+      # ================================================================
+
+      - name: Verify v8.5.7 build
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          test -d "${KEXT}"
+          test -f "${KEXT}/Contents/Info.plist"
+          test -f "${KEXT}/Contents/MacOS/rtw88"
+          test -f "${CTL}"
+
+          echo
+          echo "rtw88.kext: OK"
+          echo "rtw88ctl : OK"
+
+
+      # ================================================================
+      # 28
+      # VALIDATE PLIST
+      # ================================================================
+
+      - name: Validate Info.plist
+        shell: bash
+        run: |
+          set -eu
+
+          PLIST="Feixiao/build/out/rtw88.kext/Contents/Info.plist"
+
+          plutil -lint "${PLIST}"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "${PLIST}"
+
+
+      # ================================================================
+      # 29
+      # MACH-O
+      # ================================================================
+
+      - name: Validate Mach-O
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+          CTL="Feixiao/build/out/rtw88ctl"
+
+          file "${BIN}"
+          dwarfdump --uuid "${BIN}"
+          file "${CTL}"
+
+
+      # ================================================================
+      # 30
+      # BINARY MARKERS
+      # ================================================================
+
+      - name: Validate v8.5.7 binary markers
+        shell: bash
+        run: |
+          set -eu
+
+          BIN="Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88"
+          STRINGS_FILE="${RUNNER_TEMP}/rtw88-v857-strings.txt"
+
+          strings "${BIN}" > "${STRINGS_FILE}"
+
+          test -s "${STRINGS_FILE}"
+
+          REQUIRED="
+          RTL8821CE
+          connected chandef
+          WPA2 connected
+          TX ADDBA
+          TX ADDBA retry
+          uplink A-MPDU
+          dropping bogus mbuf
+          "
+
+          echo
+          echo "============================================================"
+          echo "BINARY MARKERS"
+          echo "============================================================"
+
+          while IFS= read -r MARKER
+          do
+
+            [ -z "${MARKER}" ] && continue
+
+            if grep -F \
+              "${MARKER}" \
+              "${STRINGS_FILE}" \
+              > /dev/null
+            then
+              echo "[OK] ${MARKER}"
+            else
+              echo "ERROR: missing marker: ${MARKER}"
+              exit 1
+            fi
+
+          done <<EOF
+          RTL8821CE
+          connected chandef
+          WPA2 connected
+          TX ADDBA
+          TX ADDBA retry
+          uplink A-MPDU
+          dropping bogus mbuf
+          EOF
+
+
+      # ================================================================
+      # 31
+      # CREATE TEST SCRIPT
+      # ================================================================
+
+      - name: Create v8.5.7 test script
+        shell: bash
+        run: |
+          set -eu
+
+          mkdir -p diagnostic
+
+          cat > diagnostic/test-v857.sh <<'TEST'
+          #!/bin/bash
+
+          set -u
+
+          CTL="${1:-./rtw88ctl}"
+
+          echo
+          echo "============================================================"
+          echo "RTL8821CE V8.5.7 TX A-MPDU TEST"
+          echo "============================================================"
+          echo
+
+          echo "STATUS"
+          echo "------------------------------------------------------------"
+
+          "${CTL}" status || true
+
+          echo
+          echo "KEXT"
+          echo "------------------------------------------------------------"
+
+          kmutil showloaded 2>/dev/null \
+            | grep -i rtw88 \
+            || true
+
+          echo
+          echo "CHANNEL WIDTH"
+          echo "------------------------------------------------------------"
+
+          log show \
+            --last 15m \
+            --style compact \
+            --predicate 'process == "kernel"' \
+            2>/dev/null \
+            | grep -i \
+              'connected chandef' \
+            | tail -50 \
+            || true
+
+          echo
+          echo "TX ADDBA / A-MPDU"
+          echo "------------------------------------------------------------"
+
+          log show \
+            --last 15m \
+            --style compact \
+            --predicate 'process == "kernel"' \
+            2>/dev/null \
+            | grep -Ei \
+              'rtw88.*(TX ADDBA|A-MPDU|BlockAck|AMPDU)' \
+            | tail -250 \
+            || true
+
+          echo
+          echo "PCI / DMA"
+          echo "------------------------------------------------------------"
+
+          log show \
+            --last 15m \
+            --style compact \
+            --predicate 'process == "kernel"' \
+            2>/dev/null \
+            | grep -Ei \
+              'rtw88.*(pci|dma|bus timeout|descriptor|ring|stall)' \
+            | tail -250 \
+            || true
+
+          echo
+          echo "RECENT RTW88"
+          echo "------------------------------------------------------------"
+
+          log show \
+            --last 10m \
+            --style compact \
+            --predicate 'process == "kernel"' \
+            2>/dev/null \
+            | grep -i rtw88 \
+            | tail -500 \
+            || true
+
+          echo
+          echo "============================================================"
+          echo "END"
+          echo "============================================================"
+          TEST
+
+          chmod +x diagnostic/test-v857.sh
+
+          bash -n diagnostic/test-v857.sh
+
+
+      # ================================================================
+      # 32
+      # PREPARE ARTIFACT
+      # ================================================================
+
+      - name: Prepare v8.5.7 artifact
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          rm -rf "${OUT}"
+          mkdir -p "${OUT}"
+
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "${OUT}/"
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "${OUT}/"
+
+          chmod +x "${OUT}/rtw88ctl"
+
+          cp \
+            diagnostic/test-v857.sh \
+            "${OUT}/"
+
+          chmod +x "${OUT}/test-v857.sh"
+
+
+      # ================================================================
+      # 33
+      # BUILD INFO
+      # ================================================================
+
+      - name: Create v8.5.7 build info
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          FEIXIAO_HASH="$(git -C Feixiao rev-parse HEAD)"
+          RTW88_HASH="$(git -C rtw88-stable rev-parse HEAD)"
+          SDK_HASH="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
+
+          UUID="$(
+            dwarfdump \
+              --uuid \
+              Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+              | awk '{print $2}' \
+              | head -1
+          )"
+
+          cat > "${OUT}/BUILD-INFO.txt" <<EOF
+          ============================================================
+          HP 256 G8
+          RTL8821CE
+          V8.5.7 STABLE HT40 + TX A-MPDU
+          ============================================================
+
+
+          SOURCE
+          ============================================================
+
+          Feixiao:
+          ${FEIXIAO_HASH}
+
+          rtw88-stable:
+          ${RTW88_HASH}
+
+          MacKernelSDK:
+          ${SDK_HASH}
+
+          Kext UUID:
+          ${UUID}
+
+
+          STABLE BASE
+          ============================================================
+
+          Based on the same stable source used for v8.5.3.
+
+          v8.5.6 5GHz stability change retained.
+
+
+          5 GHZ
+          ============================================================
+
+          20 MHz:
+          enabled
+
+          40 MHz:
+          enabled
+
+          80 MHz:
+          disabled for stability
+
+
+          TX A-MPDU
+          ============================================================
+
+          Original behavior:
+
+          One ADDBA request after connection.
+
+          If the request or response was lost, no further request was
+          sent and TX could remain non-aggregated indefinitely.
+
+
+          v8.5.7 behavior:
+
+          Initial ADDBA request:
+          preserved
+
+          Controlled retry:
+          enabled
+
+          Retry cadence:
+          one request every 64 QoS data frames while TX BA is inactive
+
+          Retry automatically stops:
+          yes, when _txBaActive becomes true
+
+          IEEE80211_TX_CTL_AMPDU:
+          original behavior preserved
+
+
+          UNCHANGED SAFETY PATHS
+          ============================================================
+
+          RX:
+          unchanged
+
+          per-packet flush:
+          unchanged
+
+          RX batching:
+          disabled
+
+          DMA:
+          unchanged
+
+          bounce buffers:
+          unchanged
+
+          mbuf protection:
+          unchanged
+
+          TX ring thresholds:
+          96 / 160
+
+          RF watchdog:
+          stable bypass
+
+          forced dynamic RX aggregation:
+          disabled
+
+          compiler -O2:
+          disabled
+
+
+          PERFORMANCE GOAL
+          ============================================================
+
+          Determine whether the severe upload limitation is caused by
+          the uplink BlockAck agreement failing to establish.
+
+          If TX ADDBA is accepted and uplink A-MPDU becomes active,
+          throughput should improve if aggregation was the bottleneck.
+
+          A specific real-world speed is not guaranteed.
+          EOF
+
+
+      # ================================================================
+      # 34
+      # TEST INSTRUCTIONS
+      # ================================================================
+
+      - name: Create test instructions
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          cat > "${OUT}/TESTE.txt" <<'EOF'
+          ============================================================
+          V8.5.7 - TESTE TX A-MPDU / BLOCKACK
+          ============================================================
+
+
+          1. BACKUP
+          ============================================================
+
+          Mantenha a v8.5.6 guardada.
+
+
+          2. INSTALAR
+          ============================================================
+
+          Substitua:
+
+          EFI/OC/Kexts/rtw88.kext
+
+
+          Não deixe Kext duplicada.
+
+
+          Utilize também:
+
+          rtw88ctl
+
+          deste MESMO pacote.
+
+
+          Reinicie o computador.
+
+
+          3. CONFIRMAR DRIVER
+          ============================================================
+
+          kmutil showloaded | grep -i rtw88
+
+
+          4. SCAN
+          ============================================================
+
+          ./rtw88ctl scan
+
+
+          5. CONEXÃO 5 GHZ
+          ============================================================
+
+          Conecte apenas uma vez no SSID 5 GHz.
+
+
+          6. STATUS
+          ============================================================
+
+          ./rtw88ctl status
+
+
+          Espere aproximadamente 30 segundos.
+
+          ./rtw88ctl status
+
+
+          A conexão deve continuar:
+
+          State: connected
+
+
+          7. GERAR TRÁFEGO
+          ============================================================
+
+          Abra algumas páginas ou faça um download pequeno.
+
+          Isso gera QoS TX suficiente para que o retry controlado de
+          ADDBA seja exercitado caso a primeira tentativa tenha falhado.
+
+
+          8. DIAGNÓSTICO
+          ============================================================
+
+          sudo ./test-v857.sh ./rtw88ctl
+
+
+          Procure por:
+
+          TX ADDBA accepted
+
+          e:
+
+          uplink A-MPDU on
+
+
+          Se aparecer:
+
+          TX ADDBA retry
+
+          significa que a tentativa inicial não ativou BlockAck e o
+          mecanismo de retry entrou em ação.
+
+
+          9. SPEEDTEST
+          ============================================================
+
+          Se o 5GHz continuar estável:
+
+          faça UM Speedtest completo.
+
+          Anote:
+
+          download
+          upload
+          ping
+
+
+          10. IMPORTANTE
+          ============================================================
+
+          Esta versão NÃO altera:
+
+          RX batching
+          DMA
+          dynamic_rx_agg
+          TX thresholds
+          watchdog
+          compilação O2
+
+          e continua limitada a 40 MHz no 5 GHz para preservar a
+          estabilidade obtida na v8.5.6.
+          EOF
+
+
+      # ================================================================
+      # 35
+      # SHA256
+      # ================================================================
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          cd "${OUT}"
+
+          shasum \
+            -a 256 \
+            rtw88ctl \
+            test-v857.sh \
+            > SHA256SUMS.txt
+
+          find \
+            rtw88.kext \
+            -type f \
+            -exec shasum -a 256 {} \; \
+            >> SHA256SUMS.txt
+
+          cat SHA256SUMS.txt
+
+
+      # ================================================================
+      # 36
+      # PACKAGE
+      # ================================================================
+
+      - name: Package HP256G8 v8.5.7
+        shell: bash
+        run: |
+          set -eu
+
+          cd "${RUNNER_TEMP}"
+
+          ZIP="Feixiao_HP256G8_v8_5_7_Stable_HT40_TX_AMPDU.zip"
+
+          rm -f "${ZIP}"
+
+          zip \
+            -r \
+            "${ZIP}" \
+            "${BUILD_NAME}"
+
+          echo
+          echo "============================================================"
+          echo "V8.5.7 PACKAGE"
+          echo "============================================================"
+
+          ls -lh "${ZIP}"
+
+
+      # ================================================================
+      # 37
+      # UPLOAD
+      # ================================================================
+
+      - name: Upload HP256G8 v8.5.7 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feixiao-HP256G8-v8.5.7-Stable-HT40-TX-AMPDU
+          path: ${{ runner.temp }}/Feixiao_HP256G8_v8_5_7_Stable_HT40_TX_AMPDU.zip
+          if-no-files-found: error
+          retention-days: 7
