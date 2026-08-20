@@ -1,0 +1,804 @@
+name: Build RTW88 Native Wi-Fi v9.0.1c Full Error Capture
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+  RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+  BUILD_NAME: RTW88-Native-WiFi-v9.0.1c-Power-Bridge-Diagnostic
+
+jobs:
+  build:
+    name: Build Native IO80211 Power Bridge
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+
+      - name: Checkout exact stable Feixiao
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: ${{ env.FEIXIAO_REF }}
+          path: Feixiao
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Validate exact Feixiao revision
+        shell: bash
+        run: |
+          set -eu
+
+          ACTUAL="$(git -C Feixiao rev-parse HEAD)"
+
+          echo "Expected: ${FEIXIAO_REF}"
+          echo "Actual  : ${ACTUAL}"
+
+          if [ "${ACTUAL}" != "${FEIXIAO_REF}" ]; then
+            echo "ERROR: wrong Feixiao revision"
+            exit 1
+          fi
+
+      - name: Clone exact rtw88-stable
+        shell: bash
+        run: |
+          set -eu
+
+          rm -rf rtw88-stable
+
+          git clone \
+            https://github.com/thegwchr/rtw88-stable.git \
+            rtw88-stable
+
+          git -C rtw88-stable checkout "${RTW88_REF}"
+
+          ACTUAL="$(git -C rtw88-stable rev-parse HEAD)"
+
+          if [ "${ACTUAL}" != "${RTW88_REF}" ]; then
+            echo "ERROR: wrong rtw88-stable revision"
+            exit 1
+          fi
+
+      - name: Validate IO80211 headers
+        shell: bash
+        run: |
+          set -eu
+
+          CTRL="Feixiao/MacKernelSDK/Headers/IOKit/80211/IO80211Controller.h"
+          IFACE="Feixiao/MacKernelSDK/Headers/IOKit/80211/IO80211Interface.h"
+          IOCTL="Feixiao/MacKernelSDK/Headers/IOKit/80211/apple80211_ioctl.h"
+
+          test -f "${CTRL}"
+          test -f "${IFACE}"
+          test -f "${IOCTL}"
+
+          grep -q \
+            'class IO80211Controller : public IOEthernetController' \
+            "${CTRL}"
+
+          grep -q \
+            'class IO80211Interface : public IOEthernetInterface' \
+            "${IFACE}"
+
+          grep -q \
+            '#define APPLE80211_IOC_POWER' \
+            "${IOCTL}"
+
+          grep -q \
+            'struct apple80211_power_data' \
+            "${IOCTL}"
+
+          echo "IO80211 headers: OK"
+
+      - name: Preserve original critical datapath hashes
+        shell: bash
+        run: |
+          set -eu
+
+          FILES="
+          Feixiao/src/kext/RTW88IEEE80211.cpp
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/rx.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
+          "
+
+          rm -f /tmp/v901-protected-before.sha256
+
+          for FILE in ${FILES}
+          do
+            shasum -a 256 "${FILE}" \
+              >> /tmp/v901-protected-before.sha256
+          done
+
+      - name: Apply known-stable 5GHz 40MHz cap
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="Feixiao/src/kext/RTW88IEEE80211.cpp"
+
+          OLD='if (chip80 && vhtWidth == 1 && vhtSeg0 != 0) {'
+          NEW='if (false && chip80 && vhtWidth == 1 && vhtSeg0 != 0) {'
+
+          COUNT="$(grep -F -c "${OLD}" "${FILE}" || true)"
+
+          if [ "${COUNT}" -ne 1 ]; then
+            echo "ERROR: expected one VHT80 condition"
+            exit 1
+          fi
+
+          sed -i '' \
+            's/if (chip80 && vhtWidth == 1 && vhtSeg0 != 0) {/if (false \&\& chip80 \&\& vhtWidth == 1 \&\& vhtSeg0 != 0) {/' \
+            "${FILE}"
+
+          grep -F "${NEW}" "${FILE}" > /dev/null
+
+          echo "Stable 5GHz 40MHz cap: applied"
+
+      - name: Convert RTW88PCIDevice superclass to IO80211Controller
+        shell: bash
+        run: |
+          set -eu
+
+          HPP="Feixiao/src/kext/RTW88PCIDevice.hpp"
+          CPP="Feixiao/src/kext/RTW88PCIDevice.cpp"
+
+          sed -i '' \
+            's|#include <IOKit/network/IOEthernetController.h>|#include <IOKit/80211/IO80211Controller.h>\
+          #include <IOKit/80211/IO80211Interface.h>\
+          #include <IOKit/80211/apple80211_ioctl.h>|' \
+            "${HPP}"
+
+          sed -i '' \
+            's/class RTW88PCIDevice : public IOEthernetController/class RTW88PCIDevice : public IO80211Controller/' \
+            "${HPP}"
+
+          sed -i '' \
+            's/IOEthernetInterface    \*_iface/IO80211Interface       *_iface/' \
+            "${HPP}"
+
+          sed -i '' \
+            's/#define super IOEthernetController/#define super IO80211Controller/' \
+            "${CPP}"
+
+          grep -q \
+            'class RTW88PCIDevice : public IO80211Controller' \
+            "${HPP}"
+
+          grep -q \
+            '#define super IO80211Controller' \
+            "${CPP}"
+
+          echo "Superclass conversion: OK"
+
+      - name: Add IO80211 required declarations
+        shell: bash
+        run: |
+          set -eu
+
+          HPP="Feixiao/src/kext/RTW88PCIDevice.hpp"
+          TMP="/tmp/RTW88PCIDevice-v901.hpp"
+
+          awk '
+          BEGIN { inserted = 0 }
+
+          /\/\* IOEthernetController \*\// && inserted == 0 {
+              print "    /* IO80211Controller - v9.0.1 native power bridge */"
+              print "    IONetworkInterface *createInterface() override;"
+              print "    SInt32 apple80211Request(unsigned int request_type,"
+              print "                              int request_number,"
+              print "                              IO80211Interface *interface,"
+              print "                              void *data) override;"
+              print "    SInt32 stopDMA() override;"
+              print "    UInt32 hardwareOutputQueueDepth(IO80211Interface *interface) override;"
+              print "    SInt32 performCountryCodeOperation(IO80211Interface *interface,"
+              print "                                        IO80211CountryCodeOp operation) override;"
+              print "    SInt32 enableFeature(IO80211FeatureCode feature, void *data) override;"
+              print ""
+              inserted = 1
+          }
+
+          { print }
+
+          END {
+              if (inserted != 1)
+                  exit 77
+          }
+          ' "${HPP}" > "${TMP}"
+
+          mv "${TMP}" "${HPP}"
+
+          grep -q \
+            'SInt32 apple80211Request' \
+            "${HPP}"
+
+          grep -q \
+            'IONetworkInterface \*createInterface() override;' \
+            "${HPP}"
+
+          echo "IO80211 declarations: OK"
+
+      - name: Add native IO80211 interface and power bridge implementation
+        shell: bash
+        run: |
+          set -eu
+
+          CPP="Feixiao/src/kext/RTW88PCIDevice.cpp"
+          TMP="/tmp/RTW88PCIDevice-v901.cpp"
+
+          awk '
+          BEGIN { inserted = 0 }
+
+          /bool RTW88PCIDevice::attachDevice\(\)/ && inserted == 0 {
+              print "IONetworkInterface *RTW88PCIDevice::createInterface()"
+              print "{"
+              print "    IO80211Interface *iface = new IO80211Interface;"
+              print "    if (!iface)"
+              print "        return nullptr;"
+              print ""
+              print "    if (!iface->init(this)) {"
+              print "        iface->release();"
+              print "        return nullptr;"
+              print "    }"
+              print ""
+              print "    IOLog(\"rtw88-native: IO80211Interface created\\n\");"
+              print "    return iface;"
+              print "}"
+              print ""
+              print "SInt32 RTW88PCIDevice::apple80211Request(unsigned int request_type,"
+              print "                                           int request_number,"
+              print "                                           IO80211Interface *interface,"
+              print "                                           void *data)"
+              print "{"
+              print "    if (request_number != APPLE80211_IOC_POWER)"
+              print "        return kIOReturnUnsupported;"
+              print ""
+              print "    if (!data)"
+              print "        return kIOReturnBadArgument;"
+              print ""
+              print "    apple80211_power_data *power ="
+              print "        reinterpret_cast<apple80211_power_data *>(data);"
+              print ""
+              print "    if (request_type == SIOCGA80211) {"
+              print "        bzero(power, sizeof(*power));"
+              print "        power->version = 1;"
+              print "        power->num_radios = 1;"
+              print "        power->power_state[0] = _enabled ? 1 : 0;"
+              print "        IOLog(\"rtw88-native: POWER GET -> %u\\n\","
+              print "              power->power_state[0]);"
+              print "        return kIOReturnSuccess;"
+              print "    }"
+              print ""
+              print "    if (request_type == SIOCSA80211) {"
+              print "        bool wantOn = power->power_state[0] != 0;"
+              print "        IOLog(\"rtw88-native: POWER SET -> %d\\n\", wantOn);"
+              print ""
+              print "        IOReturn ret = wantOn"
+              print "            ? enable(interface)"
+              print "            : disable(interface);"
+              print ""
+              print "        if (ret == kIOReturnSuccess && interface) {"
+              print "            interface->setPoweredOnByUser(wantOn);"
+              print "            interface->setEnabledBySystem(wantOn);"
+              print "            interface->setLinkState("
+              print "                wantOn ? kIO80211NetworkLinkUp"
+              print "                       : kIO80211NetworkLinkDown,"
+              print "                0);"
+              print "        }"
+              print ""
+              print "        return ret;"
+              print "    }"
+              print ""
+              print "    return kIOReturnUnsupported;"
+              print "}"
+              print ""
+              print "SInt32 RTW88PCIDevice::stopDMA()"
+              print "{"
+              print "    if (_txQueue)"
+              print "        _txQueue->stop();"
+              print "    return kIOReturnSuccess;"
+              print "}"
+              print ""
+              print "UInt32 RTW88PCIDevice::hardwareOutputQueueDepth("
+              print "    IO80211Interface *interface)"
+              print "{"
+              print "    return 256;"
+              print "}"
+              print ""
+              print "SInt32 RTW88PCIDevice::performCountryCodeOperation("
+              print "    IO80211Interface *interface,"
+              print "    IO80211CountryCodeOp operation)"
+              print "{"
+              print "    return kIOReturnSuccess;"
+              print "}"
+              print ""
+              print "SInt32 RTW88PCIDevice::enableFeature("
+              print "    IO80211FeatureCode feature,"
+              print "    void *data)"
+              print "{"
+              print "    return kIOReturnSuccess;"
+              print "}"
+              print ""
+              inserted = 1
+          }
+
+          { print }
+
+          END {
+              if (inserted != 1)
+                  exit 78
+          }
+          ' "${CPP}" > "${TMP}"
+
+          mv "${TMP}" "${CPP}"
+
+          grep -q \
+            'RTW88PCIDevice::apple80211Request' \
+            "${CPP}"
+
+          grep -q \
+            'RTW88PCIDevice::createInterface' \
+            "${CPP}"
+
+          grep -q \
+            'interface->setPoweredOnByUser' \
+            "${CPP}"
+
+          echo "Native power bridge implementation: OK"
+
+      - name: Add IO80211 compiler target
+        shell: bash
+        run: |
+          set -eu
+
+          MAKEFILE="Feixiao/Makefile"
+
+          perl -0pi -e \
+            's/(-DKERNEL \\\n)/$1    -D__IO80211_TARGET=__MAC_11_0 \\\n/' \
+            "${MAKEFILE}"
+
+          COUNT="$(
+            grep -F \
+              -c \
+              -- '-D__IO80211_TARGET=__MAC_11_0' \
+              "${MAKEFILE}" \
+              || true
+          )"
+
+          if [ "${COUNT}" -ne 1 ]; then
+            echo "ERROR: IO80211 target define invalid"
+            exit 1
+          fi
+
+          echo "IO80211 target define: OK"
+
+      - name: Add IO80211Family bundle dependency and v9.0.1 version
+        shell: bash
+        run: |
+          set -eu
+
+          PLIST="Feixiao/rtw88.kext/Contents/Info.plist"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :OSBundleLibraries:com.apple.iokit.IO80211Family string 1.0.0" \
+            "${PLIST}" \
+            || /usr/libexec/PlistBuddy \
+                 -c "Set :OSBundleLibraries:com.apple.iokit.IO80211Family 1.0.0" \
+                 "${PLIST}"
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleVersion 9.0.1" \
+            "${PLIST}"
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleShortVersionString 9.0.1" \
+            "${PLIST}"
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :OSBundleCompatibleVersion 1.1.0" \
+            "${PLIST}"
+
+          plutil -lint "${PLIST}"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :OSBundleLibraries:com.apple.iokit.IO80211Family" \
+            "${PLIST}"
+
+      - name: Validate native class is concrete
+        shell: bash
+        run: |
+          set -eu
+
+          PROJ="${GITHUB_WORKSPACE}/Feixiao"
+          SDK="$(xcrun --show-sdk-path)"
+          MKSDK="${PROJ}/MacKernelSDK"
+          COMPAT="${PROJ}/src/compat"
+          KEXT_SRC="${PROJ}/src/kext"
+
+          cat > /tmp/v901-concrete.cpp <<'EOF'
+          #include "RTW88PCIDevice.hpp"
+
+          static_assert(
+              !__is_abstract(RTW88PCIDevice),
+              "RTW88PCIDevice remains abstract after IO80211 conversion"
+          );
+          EOF
+
+          xcrun clang++ \
+            -fsyntax-only \
+            /tmp/v901-concrete.cpp \
+            -fno-exceptions \
+            -fno-rtti \
+            -fno-stack-protector \
+            -mkernel \
+            -arch x86_64 \
+            -mmacosx-version-min=11.0 \
+            -isysroot "${SDK}" \
+            -I"${MKSDK}/Headers" \
+            -I"${SDK}/System/Library/Frameworks/Kernel.framework/Headers" \
+            -I"${COMPAT}" \
+            -I"${COMPAT}/linux" \
+            -I"${KEXT_SRC}" \
+            -fapple-kext \
+            -std=c++17 \
+            -DKERNEL \
+            -D__IO80211_TARGET=__MAC_11_0 \
+            -Wno-deprecated-declarations \
+            -Wno-nullability-completeness
+
+          echo "RTW88PCIDevice concrete IO80211 class: OK"
+
+      - name: Verify only intended protected datapath change exists
+        shell: bash
+        run: |
+          set -eu
+
+          FILES="
+          Feixiao/src/compat/rtw88_compat.c
+          Feixiao/src/compat/rtw88_compat.h
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/rx.c
+          rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
+          "
+
+          rm -f /tmp/v901-protected-after.sha256
+          rm -f /tmp/v901-protected-before-filtered.sha256
+
+          for FILE in ${FILES}
+          do
+            shasum -a 256 "${FILE}" \
+              >> /tmp/v901-protected-after.sha256
+          done
+
+          grep -v \
+            'Feixiao/src/kext/RTW88IEEE80211.cpp' \
+            /tmp/v901-protected-before.sha256 \
+            > /tmp/v901-protected-before-filtered.sha256
+
+          if ! cmp \
+            -s \
+            /tmp/v901-protected-before-filtered.sha256 \
+            /tmp/v901-protected-after.sha256
+          then
+            echo "ERROR: protected datapath source changed"
+            exit 1
+          fi
+
+          echo "RX/DMA/PCI/Linux TX core: unchanged"
+
+      - name: Download Realtek firmware
+        shell: bash
+        run: |
+          set -eu
+
+          cd Feixiao/firmware
+
+          FIRMWARE_FILES="
+          rtw8822b_fw.bin
+          rtw8822c_fw.bin
+          rtw8821c_fw.bin
+          rtw8821a_fw.bin
+          rtw8812a_fw.bin
+          rtw8814a_fw.bin
+          "
+
+          for FW in ${FIRMWARE_FILES}
+          do
+            if [ ! -s "${FW}" ]; then
+              curl \
+                --location \
+                --fail \
+                --retry 3 \
+                --retry-delay 2 \
+                "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88/${FW}" \
+                --output "${FW}"
+            fi
+
+            test -s "${FW}"
+            echo "[OK] ${FW}"
+          done
+
+      - name: Show exact source diff
+        shell: bash
+        run: |
+          set -eu
+
+          git -C Feixiao diff
+
+      - name: Clean build
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set -eu
+          make clean || true
+          rm -rf build/out || true
+
+      - name: Build native v9.0.1c kext with full failure capture
+        shell: bash
+        working-directory: Feixiao
+        run: |
+          set +e
+
+          LOG="${RUNNER_TEMP}/rtw88-v901c-build.log"
+
+          echo "============================================================"
+          echo "RTW88 NATIVE WI-FI v9.0.1c POWER BRIDGE"
+          echo "FULL FAILURE CAPTURE"
+          echo "============================================================"
+          echo
+          echo "Controller superclass : IO80211Controller"
+          echo "Interface             : IO80211Interface"
+          echo "Native POWER GET/SET  : enabled"
+          echo "Hardware power path   : existing enable()/disable()"
+          echo "Radio core            : stable"
+          echo "5 GHz                 : capped at 40 MHz"
+          echo "RX/DMA                 : unchanged"
+          echo "Build parallelism      : disabled (-j1)"
+          echo
+          echo "Complete log:"
+          echo "${LOG}"
+          echo
+
+          MAKEFLAGS="-j1" make -j1 all > "${LOG}" 2>&1
+          RC=$?
+
+          cat "${LOG}"
+
+          echo
+          echo "============================================================"
+          echo "BUILD RETURN CODE: ${RC}"
+          echo "============================================================"
+
+          if [ "${RC}" -ne 0 ]; then
+            echo
+            echo "============================================================"
+            echo "FIRST COMPILER/LINKER/MAKE ERRORS"
+            echo "============================================================"
+            grep -nEi               '(^|[^[:alpha:]])(fatal error:|error:|undefined symbols|symbol\(s\) not found|ld:|clang: error|make\[[0-9]+\]: \*\*\*|make: \*\*\*)'               "${LOG}"               | head -80               || true
+
+            echo
+            echo "============================================================"
+            echo "LAST 250 LINES"
+            echo "============================================================"
+            tail -250 "${LOG}"
+
+            exit "${RC}"
+          fi
+
+          echo
+          echo "Build completed successfully."
+
+      - name: Upload full build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTW88-v9.0.1c-full-build-log
+          path: ${{ runner.temp }}/rtw88-v901c-build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Validate generated kext
+        shell: bash
+        run: |
+          set -eu
+
+          KEXT="Feixiao/build/out/rtw88.kext"
+          BIN="${KEXT}/Contents/MacOS/rtw88"
+          PLIST="${KEXT}/Contents/Info.plist"
+
+          test -d "${KEXT}"
+          test -s "${BIN}"
+          test -f "${PLIST}"
+
+          plutil -lint "${PLIST}"
+
+          file "${BIN}"
+          dwarfdump --uuid "${BIN}"
+
+          NM_FILE="${RUNNER_TEMP}/v901-nm.txt"
+          STR_FILE="${RUNNER_TEMP}/v901-strings.txt"
+
+          nm "${BIN}" > "${NM_FILE}"
+          strings "${BIN}" > "${STR_FILE}"
+
+          grep -F \
+            'RTW88PCIDevice' \
+            "${NM_FILE}" \
+            > /dev/null
+
+          grep -F \
+            'rtw88-native: POWER SET' \
+            "${STR_FILE}" \
+            > /dev/null
+
+          grep -F \
+            'rtw88-native: IO80211Interface created' \
+            "${STR_FILE}" \
+            > /dev/null
+
+          echo "Native Kext binary markers: OK"
+
+      - name: Create installation notes
+        shell: bash
+        run: |
+          set -eu
+
+          OUT="${RUNNER_TEMP}/${BUILD_NAME}"
+
+          rm -rf "${OUT}"
+          mkdir -p "${OUT}"
+
+          cp -R \
+            Feixiao/build/out/rtw88.kext \
+            "${OUT}/"
+
+          cp \
+            Feixiao/build/out/rtw88ctl \
+            "${OUT}/"
+
+          chmod +x "${OUT}/rtw88ctl"
+
+          cat > "${OUT}/LEIA-ME-PRIMEIRO.txt" <<'EOF'
+          ============================================================
+          RTW88 NATIVE WI-FI v9.0.1 - POWER BRIDGE
+          ============================================================
+
+          ESTA É UMA KEXT EXPERIMENTAL.
+
+          Objetivo desta etapa:
+          - publicar a RTL8821CE através de IO80211Controller
+          - criar IO80211Interface
+          - aceitar POWER GET / POWER SET do macOS
+          - encaminhar ligar/desligar para o mesmo hardware rtw88 já funcional
+
+          Ainda NÃO implementa:
+          - lista nativa de redes
+          - scan Apple80211 completo
+          - associação nativa
+          - senha pelo painel do macOS
+          - redes salvas pelo macOS
+
+          IMPORTANTE PARA macOS TAHOE:
+          O Tahoe não oferece o antigo stack IO80211 legado de forma nativa
+          como versões antigas do macOS. Esta Kext referencia
+          com.apple.iokit.IO80211Family e portanto só deve ser testada se o
+          sistema tiver um stack IO80211 compatível/restaurado.
+
+          NÃO substitua seu único backup funcional.
+
+          Antes:
+          1. mantenha a rtw88.kext estável salva
+          2. tenha acesso à EFI por outro sistema ou pendrive
+          3. mantenha forma de remover esta Kext se o boot falhar
+
+          Instalação no OpenCore:
+          EFI/OC/Kexts/rtw88.kext
+
+          Use somente UMA rtw88.kext.
+
+          Faça snapshot/backup da EFI antes do teste.
+
+          Primeiro teste:
+          - boot do macOS
+          - verificar se não há kernel panic
+          - verificar IORegistry
+          - verificar Ajustes do Sistema > Wi-Fi
+          - testar apenas ON/OFF
+
+          NÃO teste velocidade nesta etapa.
+
+          Se o sistema não iniciar:
+          volte imediatamente para a Kext estável.
+          EOF
+
+          cat > "${OUT}/TESTE.txt" <<'EOF'
+          Depois do boot:
+
+          1)
+          kmutil showloaded | grep -Ei 'rtw88|IO80211'
+
+          2)
+          ioreg -l | grep -Ei 'RTW88PCIDevice|IO80211Interface|RTL8821CE'
+
+          3)
+          Vá em Ajustes do Sistema > Wi-Fi.
+
+          4)
+          Veja se o botão Wi-Fi aparece e responde ao ON/OFF.
+
+          5)
+          Se o sistema continuar estável, envie fotos dos resultados.
+
+          Nesta v9.0.1 não esperamos ainda lista/associação nativa completa.
+          EOF
+
+          UUID="$(
+            dwarfdump \
+              --uuid \
+              Feixiao/build/out/rtw88.kext/Contents/MacOS/rtw88 \
+              | awk '{print $2}' \
+              | head -1
+          )"
+
+          FEIXIAO_COMMIT="$(git -C Feixiao rev-parse HEAD)"
+          RTW88_COMMIT="$(git -C rtw88-stable rev-parse HEAD)"
+          SDK_COMMIT="$(git -C Feixiao/MacKernelSDK rev-parse HEAD)"
+
+          cat > "${OUT}/BUILD-INFO.txt" <<EOF
+          Version: 9.0.1
+          Purpose: Native IO80211 power bridge
+          Feixiao: ${FEIXIAO_COMMIT}
+          rtw88-stable: ${RTW88_COMMIT}
+          MacKernelSDK: ${SDK_COMMIT}
+          UUID: ${UUID}
+
+          Native controller: IO80211Controller
+          Native interface: IO80211Interface
+          POWER GET/SET: implemented
+          Scan/associate native UI: not yet implemented
+          5GHz max: 40 MHz for current stability
+          RX/DMA/Linux datapath: unchanged
+          EOF
+
+          cd "${OUT}"
+
+          shasum \
+            -a 256 \
+            rtw88ctl \
+            rtw88.kext/Contents/MacOS/rtw88 \
+            rtw88.kext/Contents/Info.plist \
+            > SHA256SUMS.txt
+
+      - name: Package v9.0.1
+        shell: bash
+        run: |
+          set -eu
+
+          cd "${RUNNER_TEMP}"
+
+          ZIP="${BUILD_NAME}.zip"
+
+          rm -f "${ZIP}"
+
+          zip \
+            -r \
+            "${ZIP}" \
+            "${BUILD_NAME}"
+
+          ls -lh "${ZIP}"
+
+      - name: Upload v9.0.1 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTW88-Native-WiFi-v9.0.1c-Power-Bridge-Diagnostic
+          path: ${{ runner.temp }}/RTW88-Native-WiFi-v9.0.1c-Power-Bridge-Diagnostic.zip
+          if-no-files-found: error
+          retention-days: 7
