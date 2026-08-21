@@ -1,0 +1,675 @@
+name: RTW88 v9.0.8e Real Kext IO80211 V2 Load Foundation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build real RTL8821CE IO80211ControllerV2 foundation
+    runs-on: macos-26
+
+    env:
+      FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+      RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+      ITLWM_REF: 53c51c2cdd6e4b69beb91f310d74c53422b0f8bd
+      BUILD_NAME: RTW88-v9.0.8e-Real-Kext-IO80211V2-Foundation
+
+    steps:
+      - name: Checkout Feixiao stable
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: ${{ env.FEIXIAO_REF }}
+          path: Feixiao
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Checkout rtw88-stable
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/rtw88-stable
+          ref: ${{ env.RTW88_REF }}
+          path: rtw88-stable
+          fetch-depth: 1
+
+      - name: Checkout AirportItlwm V2 headers
+        uses: actions/checkout@v4
+        with:
+          repository: OpenIntelWireless/itlwm
+          ref: ${{ env.ITLWM_REF }}
+          path: itlwm
+          fetch-depth: 1
+
+      - name: Verify pinned source revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(git -C Feixiao rev-parse HEAD)" = "${FEIXIAO_REF}"
+          test "$(git -C rtw88-stable rev-parse HEAD)" = "${RTW88_REF}"
+          test "$(git -C itlwm rev-parse HEAD)" = "${ITLWM_REF}"
+
+          echo "Feixiao     : $(git -C Feixiao rev-parse HEAD)"
+          echo "rtw88-stable: $(git -C rtw88-stable rev-parse HEAD)"
+          echo "itlwm       : $(git -C itlwm rev-parse HEAD)"
+
+      - name: Verify v9.0.7 ABI prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          H="itlwm/include/Airport/IO80211ControllerV2.h"
+          A="itlwm/include/Airport/Apple80211.h"
+
+          test -f "${H}"
+          test -f "${A}"
+
+          check() {
+            local label="$1"
+            local regex="$2"
+            if grep -Eq "${regex}" "${H}"; then
+              echo "[OK] ${label}"
+            else
+              echo "[FAIL] ${label}"
+              echo "Relevant header lines:"
+              grep -n -E 'IO80211Controller|isCommandProhibited|handleCardSpecific|enableFeature|getPOWER|setPOWER|postMessage' "${H}" || true
+              exit 1
+            fi
+          }
+
+          check "IO80211Controller superclass" 'class[[:space:]]+IO80211Controller[[:space:]]*:[[:space:]]*public[[:space:]]+IOEthernetController'
+          check "isCommandProhibited pure virtual" 'virtual[[:space:]]+bool[[:space:]]+isCommandProhibited\(int\)[[:space:]]*=[[:space:]]*0;'
+          check "handleCardSpecific" 'virtual[[:space:]]+SInt32[[:space:]]+handleCardSpecific'
+          check "enableFeature" 'virtual[[:space:]]+SInt32[[:space:]]+enableFeature'
+          check "getPOWER" 'virtual[[:space:]]+IOReturn[[:space:]]+getPOWER'
+          check "setPOWER" 'virtual[[:space:]]+IOReturn[[:space:]]+setPOWER'
+          check "postMessage" 'virtual[[:space:]]+void[[:space:]]+postMessage'
+
+          echo "IO80211ControllerV2 ABI header prerequisites: OK"
+
+      - name: Patch RTW88PCIDevice to IO80211ControllerV2
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          H="src/kext/RTW88PCIDevice.hpp"
+          C="src/kext/RTW88PCIDevice.cpp"
+
+          cp "${H}" "${H}.stable-v853"
+          cp "${C}" "${C}.stable-v853"
+
+          perl -0pi -e 's@#include <IOKit/network/IOEthernetController\.h>@#include "Apple80211.h"\n#include <IOKit/network/IOEthernetController.h>@' "${H}"
+          perl -0pi -e 's@class RTW88PCIDevice : public IOEthernetController@class RTW88PCIDevice : public IO80211Controller@' "${H}"
+
+          perl -0pi -e 's@(\s*/\* IOUserClient creation \*/)@    /* IO80211ControllerV2 ABI foundation — intentionally minimal in v9.0.8 */\n    bool isCommandProhibited(int command) override;\n    SInt32 handleCardSpecific(IO80211SkywalkInterface *, unsigned long, void *, bool) override;\n    SInt32 enableFeature(IO80211FeatureCode, void *) override;\n    IOReturn getDRIVER_VERSION(IO80211SkywalkInterface *, apple80211_version_data *) override;\n    IOReturn getHARDWARE_VERSION(IO80211SkywalkInterface *, apple80211_version_data *) override;\n    IOReturn getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple80211_capability_data *) override;\n    IOReturn getPOWER(IO80211SkywalkInterface *, apple80211_power_data *) override;\n    IOReturn setPOWER(IO80211SkywalkInterface *, apple80211_power_data *) override;\n    IOReturn getCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *) override;\n    IOReturn setCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *) override;\n    IOReturn setGET_DEBUG_INFO(IO80211SkywalkInterface *, apple80211_debug_command *) override;\n    void postMessage(UInt, void *, unsigned long, UInt, void *) override;\n\n$1@' "${H}"
+
+          perl -0pi -e 's@#define super IOEthernetController\nOSDefineMetaClassAndStructors\(RTW88PCIDevice, IOEthernetController\)@#define super IO80211Controller\nOSDefineMetaClassAndStructors(RTW88PCIDevice, IO80211Controller)@' "${C}"
+
+          # IO80211ControllerV2 declares its own attachInterface/detachInterface
+          # overloads, which hide the legacy IONetworkController overloads used
+          # by Feixiao's stable IOEthernetInterface path. Call the original
+          # IOEthernetController methods explicitly in this foundation build.
+          perl -0pi -e 's@if \(!attachInterface\(\(IONetworkInterface \*\*\)&_iface\)\)@if (!IOEthernetController::attachInterface((IONetworkInterface **)&_iface))@' "${C}"
+          perl -0pi -e 's@detachInterface\(_iface\);@IOEthernetController::detachInterface(_iface);@' "${C}"
+
+          grep -n 'IOEthernetController::attachInterface' "${C}"
+          grep -n 'IOEthernetController::detachInterface' "${C}"
+
+          cat >> "${C}" <<'EOF'
+
+          /* ------------------------------------------------------------------ */
+          /* v9.0.8 — Tahoe IO80211ControllerV2 ABI foundation                  */
+          /*                                                                    */
+          /* These are deliberately conservative stubs. The existing stable    */
+          /* Feixiao radio/RX/TX path remains untouched. Native Apple80211       */
+          /* scan/associate/state plumbing is NOT enabled in this version.       */
+          /* ------------------------------------------------------------------ */
+
+          bool RTW88PCIDevice::isCommandProhibited(int)
+          {
+              return false;
+          }
+
+          SInt32 RTW88PCIDevice::handleCardSpecific(
+              IO80211SkywalkInterface *,
+              unsigned long,
+              void *,
+              bool)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          SInt32 RTW88PCIDevice::enableFeature(IO80211FeatureCode, void *)
+          {
+              return kIOReturnSuccess;
+          }
+
+          IOReturn RTW88PCIDevice::getDRIVER_VERSION(
+              IO80211SkywalkInterface *,
+              apple80211_version_data *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          IOReturn RTW88PCIDevice::getHARDWARE_VERSION(
+              IO80211SkywalkInterface *,
+              apple80211_version_data *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          IOReturn RTW88PCIDevice::getCARD_CAPABILITIES(
+              IO80211SkywalkInterface *,
+              apple80211_capability_data *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          IOReturn RTW88PCIDevice::getPOWER(
+              IO80211SkywalkInterface *,
+              apple80211_power_data *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          IOReturn RTW88PCIDevice::setPOWER(
+              IO80211SkywalkInterface *,
+              apple80211_power_data *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          IOReturn RTW88PCIDevice::getCOUNTRY_CODE(
+              IO80211SkywalkInterface *,
+              apple80211_country_code_data *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          IOReturn RTW88PCIDevice::setCOUNTRY_CODE(
+              IO80211SkywalkInterface *,
+              apple80211_country_code_data *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          IOReturn RTW88PCIDevice::setGET_DEBUG_INFO(
+              IO80211SkywalkInterface *,
+              apple80211_debug_command *)
+          {
+              return kIOReturnUnsupported;
+          }
+
+          void RTW88PCIDevice::postMessage(
+              UInt,
+              void *,
+              unsigned long,
+              UInt,
+              void *)
+          {
+          }
+          EOF
+
+          echo "Superclass:"
+          grep -n 'class RTW88PCIDevice' "${H}"
+          grep -n 'OSDefineMetaClassAndStructors' "${C}"
+
+          echo
+          echo "V2 methods:"
+          grep -n -E 'isCommandProhibited|handleCardSpecific|getPOWER|setPOWER|postMessage' "${H}" "${C}"
+
+      - name: Patch build flags for AirportItlwm V2 headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          cp Makefile Makefile.stable-v853
+
+          awk '
+            BEGIN { in_cxx = 0; added_inc = 0; added_defs = 0 }
+
+            /^KEXT_CXXFLAGS :=/ {
+              in_cxx = 1
+              print
+              next
+            }
+
+            in_cxx && /^[[:space:]]+\$\(KEXT_FLAGS\)[[:space:]]*\\/ {
+              print
+              if (!added_inc) {
+                print "    -I$(PROJ_ROOT)/../itlwm/include/Airport \\"
+                print "    -I$(PROJ_ROOT)/../itlwm/include \\"
+                added_inc = 1
+              }
+              next
+            }
+
+            in_cxx && /^[[:space:]]+-DKERNEL[[:space:]]*\\/ {
+              print
+              if (!added_defs) {
+                print "    -DIO80211FAMILY_V2=1 \\"
+                print "    -D__IO80211_TARGET=__MAC_11_0 \\"
+                added_defs = 1
+              }
+              next
+            }
+
+            in_cxx && /^[^[:space:]]/ && $0 !~ /^KEXT_CXXFLAGS :=/ {
+              in_cxx = 0
+            }
+
+            { print }
+
+            END {
+              if (!added_inc) {
+                print "ERROR: did not patch AirportItlwm include paths" > "/dev/stderr"
+                exit 41
+              }
+              if (!added_defs) {
+                print "ERROR: did not patch IO80211 V2 defines" > "/dev/stderr"
+                exit 42
+              }
+            }
+          ' Makefile > Makefile.v908d
+
+          mv Makefile.v908d Makefile
+
+          echo "Patched KEXT_CXXFLAGS:"
+          grep -n -A18 '^KEXT_CXXFLAGS' Makefile
+
+          echo
+          echo "Sanity check: literal Make variables must be preserved"
+          grep -F '$(KEXT_FLAGS)' Makefile >/dev/null
+          grep -F '$(PROJ_ROOT)/../itlwm/include/Airport' Makefile >/dev/null
+          grep -F -- '-DIO80211FAMILY_V2=1' Makefile >/dev/null
+          grep -F -- '-D__IO80211_TARGET=__MAC_11_0' Makefile >/dev/null
+
+          if grep -E '^[[:space:]]+[0-9]+([[:space:]]+[0-9]+)+KEXT_FLAGS' Makefile >/dev/null; then
+            echo "ERROR: Make variables were expanded/corrupted"
+            exit 43
+          fi
+
+          echo "Makefile V2 flags patch: OK"
+
+      - name: Patch Info.plist for IO80211Family and v9.0.8
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          P="rtw88.kext/Contents/Info.plist"
+          cp "${P}" "${P}.stable-v853"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 9.0.8" "${P}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 9.0.8" "${P}"
+          /usr/libexec/PlistBuddy -c "Set :OSBundleCompatibleVersion 9.0.8" "${P}"
+
+          if /usr/libexec/PlistBuddy -c "Print :OSBundleLibraries:com.apple.iokit.IO80211Family" "${P}" >/dev/null 2>&1; then
+            /usr/libexec/PlistBuddy -c "Set :OSBundleLibraries:com.apple.iokit.IO80211Family 1.0.0" "${P}"
+          else
+            /usr/libexec/PlistBuddy -c "Add :OSBundleLibraries:com.apple.iokit.IO80211Family string 1.0.0" "${P}"
+          fi
+
+          plutil -lint "${P}"
+
+          echo "Version:"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "${P}"
+          echo "IO80211 dependency:"
+          /usr/libexec/PlistBuddy -c "Print :OSBundleLibraries:com.apple.iokit.IO80211Family" "${P}"
+          echo "RTL8821CE match:"
+          /usr/libexec/PlistBuddy -c "Print :IOKitPersonalities:RTL8821CE:IOPCIMatch" "${P}"
+
+      - name: Verify stable radio datapath was not intentionally modified
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          # v9.0.8 must preserve the known-stable thresholds and RX source.
+          grep -q 'kRTW88TxStallAvail = 96' src/kext/RTW88PCIDevice.cpp
+          grep -q 'kRTW88TxResumeAvail = 160' src/kext/RTW88PCIDevice.cpp
+
+          # No changes to the 802.11 engine in this foundation build.
+          git diff --exit-code "${FEIXIAO_REF}" -- src/kext/RTW88IEEE80211.cpp src/kext/RTW88IEEE80211.hpp
+
+          echo "Stable RTW88IEEE80211 datapath untouched: OK"
+          echo "TX thresholds 96/160 preserved: OK"
+
+      - name: Verify RTW88PCIDevice V2 class is concrete
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJ="${GITHUB_WORKSPACE}"
+          SDK="$(xcrun --show-sdk-path)"
+          MKSDK="${PROJ}/Feixiao/MacKernelSDK"
+          AIRPORT="${PROJ}/itlwm/include/Airport"
+
+          cat > "${RUNNER_TEMP}/v908-concrete.cpp" <<'EOF'
+          #define IO80211FAMILY_V2 1
+          #define __IO80211_TARGET __MAC_11_0
+          #include "RTW88PCIDevice.hpp"
+          static_assert(!__is_abstract(RTW88PCIDevice),
+                        "RTW88PCIDevice is still abstract under IO80211ControllerV2");
+          EOF
+
+          xcrun clang++ \
+            -fsyntax-only "${RUNNER_TEMP}/v908-concrete.cpp" \
+            -fno-exceptions \
+            -fno-rtti \
+            -fno-stack-protector \
+            -mkernel \
+            -arch x86_64 \
+            -mmacosx-version-min=11.0 \
+            -isysroot "${SDK}" \
+            -I"${PROJ}/Feixiao/src/kext" \
+            -I"${PROJ}/Feixiao/src/compat" \
+            -I"${PROJ}/Feixiao/src/compat/linux" \
+            -I"${AIRPORT}" \
+            -I"${PROJ}/itlwm/include" \
+            -I"${MKSDK}/Headers" \
+            -I"${SDK}/System/Library/Frameworks/Kernel.framework/Headers" \
+            -fapple-kext \
+            -std=c++17 \
+            -DKERNEL \
+            -DIO80211FAMILY_V2=1 \
+            -D__IO80211_TARGET=__MAC_11_0 \
+            -Wno-deprecated-declarations \
+            -Wno-nullability-completeness
+
+          echo "RTW88PCIDevice is concrete under V2: OK"
+
+      - name: Build real rtw88.kext and rtw88ctl
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          make clean
+
+          BUILD_LOG="${RUNNER_TEMP}/rtw88-v908e-build.log"
+
+          set +e
+          make -j1 all 2>&1 | tee "${BUILD_LOG}"
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          if [ "${RC}" -ne 0 ]; then
+            echo
+            echo "============================================================"
+            echo "FIRST COMPILER ERRORS"
+            echo "============================================================"
+            grep -n -E '(^|: )[Ff]atal error:|(^|: )error:' "${BUILD_LOG}" | head -120 || true
+            echo
+            echo "Full build log: ${BUILD_LOG}"
+            exit "${RC}"
+          fi
+
+          test -f build/out/rtw88.kext/Contents/MacOS/rtw88
+          test -f build/out/rtw88ctl
+          plutil -lint build/out/rtw88.kext/Contents/Info.plist
+
+          echo
+          file build/out/rtw88.kext/Contents/MacOS/rtw88
+          dwarfdump --uuid build/out/rtw88.kext/Contents/MacOS/rtw88 || true
+
+      - name: Verify real Kext V2 symbols and no unresolved postMessage
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          BIN="build/out/rtw88.kext/Contents/MacOS/rtw88"
+          DEM="${RUNNER_TEMP}/v908-nm-demangled.txt"
+
+          nm "${BIN}" | c++filt > "${DEM}"
+
+          grep -F "RTW88PCIDevice::postMessage(" "${DEM}" >/dev/null
+          grep -F "RTW88PCIDevice::getPOWER(" "${DEM}" >/dev/null
+          grep -F "RTW88PCIDevice::setPOWER(" "${DEM}" >/dev/null
+
+          if grep -E '^[[:space:]]*U[[:space:]]+IO80211Controller::postMessage\(' "${DEM}" >/dev/null; then
+            echo "ERROR: unresolved IO80211Controller::postMessage remains"
+            grep -F "IO80211Controller::postMessage(" "${DEM}" || true
+            exit 1
+          fi
+
+          echo "RTW88PCIDevice V2 overrides present: OK"
+          echo "Unresolved base postMessage: NONE"
+
+      - name: Validate bundle identity and RTL8821CE personality
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          P="build/out/rtw88.kext/Contents/Info.plist"
+
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${P}")" = "com.rtw88.driver"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${P}")" = "9.0.8"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTL8821CE:IOPCIMatch' "${P}")" = "0xC82110EC"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTL8821CE:IOClass' "${P}")" = "RTW88PCIDevice"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :OSBundleLibraries:com.apple.iokit.IO80211Family' "${P}")" = "1.0.0"
+
+          echo "Real hardware personality 10EC:C821 preserved: OK"
+          echo "Bundle ID com.rtw88.driver preserved: OK"
+          echo "IO80211Family dependency present: OK"
+
+      - name: Create safe Tahoe load-test script
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          cat > build/out/test-v908e-load-on-tahoe.sh <<'EOF'
+          #!/bin/bash
+          set -u
+
+          KEXT="${1:-./rtw88.kext}"
+          CTL="${2:-./rtw88ctl}"
+          LOG="${HOME}/rtw88-v908e-load-test.txt"
+
+          echo "============================================================"
+          echo "RTW88 v9.0.8 REAL KEXT - TAHOE LOAD FOUNDATION TEST"
+          echo "============================================================"
+          echo
+          echo "WARNING:"
+          echo "This Kext DOES match the RTL8821CE hardware."
+          echo "Do NOT copy it to EFI for the first test."
+          echo "Keep your known-good rtw88.kext backup."
+          echo
+
+          if [ ! -d "${KEXT}" ]; then
+            echo "Kext not found: ${KEXT}"
+            exit 2
+          fi
+
+          echo "[0] Existing driver state"
+          kmutil showloaded | grep -Ei 'com\.rtw88\.driver|IO80211Family' || true
+          echo
+
+          if kmutil showloaded | grep -q 'com\.rtw88\.driver'; then
+            echo "A com.rtw88.driver instance is already loaded."
+            echo "For this first v9.0.8 test, boot without the old rtw88.kext loaded"
+            echo "or unload the old instance before continuing."
+            exit 3
+          fi
+
+          echo "[1] Ownership / permissions"
+          sudo chown -R 0:0 "${KEXT}"
+          sudo chmod -R 755 "${KEXT}"
+          echo
+
+          echo "[2] kmutil load"
+          set +e
+          sudo kmutil load -p "${KEXT}" 2>&1 | tee "${LOG}"
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          echo
+          echo "kmutil return code: ${RC}"
+          echo "full log: ${LOG}"
+
+          if [ "${RC}" -ne 0 ]; then
+            echo
+            echo "LOAD FAILED."
+            echo "Do NOT put v9.0.8 in EFI."
+            echo
+            echo "First ABI/link line:"
+            grep -m1 -E \
+              "Failed to bind|Malformed vtable|could not find a kext which exports|undefined symbol|dependency" \
+              "${LOG}" || true
+            exit "${RC}"
+          fi
+
+          echo
+          echo "[3] Loaded state"
+          kmutil showloaded | grep -Ei 'com\.rtw88\.driver|IO80211Family' || true
+
+          echo
+          echo "[4] IOKit attachment"
+          ioreg -l -w0 | grep -Ei 'RTW88PCIDevice|C821|rtw8821c' | head -120 || true
+
+          echo
+          echo "[5] rtw88ctl visibility"
+          if [ -x "${CTL}" ]; then
+            "${CTL}" status || true
+          else
+            echo "rtw88ctl not executable or not found: ${CTL}"
+          fi
+
+          echo
+          echo "v9.0.8 LOAD FOUNDATION TEST FINISHED."
+          echo "Do not move it to EFI yet."
+          EOF
+
+          chmod +x build/out/test-v908e-load-on-tahoe.sh
+
+      - name: Create README
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          cat > build/out/LEIA-ME-v9.0.8e.txt <<'EOF'
+          RTW88 v9.0.8 — REAL KEXT IO80211ControllerV2 FOUNDATION
+
+          OBJETIVO DESTA VERSAO
+          ---------------------
+          Esta e a primeira build em que a RTW88PCIDevice real, que casa com
+          PCI 10EC:C821 (RTL8821CE), herda de IO80211Controller V2.
+
+          Ela NAO implementa ainda o Wi-Fi nativo completo do macOS.
+
+          O objetivo da v9.0.8 e somente verificar, nesta ordem:
+          1. a Kext real compila com a ABI V2;
+          2. o kmutil aceita a vtable;
+          3. a personality RTL8821CE casa com o dispositivo;
+          4. o driver inicializa sem kernel panic;
+          5. o rtw88ctl continua enxergando o driver.
+
+          PRESERVADO
+          ----------
+          - Feixiao base e963f43188382eced4ef2fa75d19ce4db2315c68
+          - rtw88-stable d029a677c49266fad86750714eb5612becd134d3
+          - RX/TX e RTW88IEEE80211 da base estavel nao foram alterados
+          - TX thresholds 96/160
+          - DMA bounce existente
+          - firmware embarcado pelo build normal
+          - personality 10EC:C821
+          - bundle ID com.rtw88.driver
+
+          ALTERADO
+          --------
+          - RTW88PCIDevice: IOEthernetController -> IO80211Controller V2
+          - pure virtuals V2 implementados como stubs conservadores
+          - postMessage sobrescrito na subclass, como validado pela probe 9.0.7
+          - dependencia com.apple.iokit.IO80211Family adicionada
+          - headers V2 do AirportItlwm usados para compilacao
+
+          IMPORTANTE
+          ----------
+          NAO COLOQUE ESTA v9.0.8 NA EFI NO PRIMEIRO TESTE.
+
+          Ela casa com a placa RTL8821CE real. Diferente da probe 9.0.7,
+          esta Kext pode executar o caminho de inicializacao de hardware.
+
+          Mantenha a Kext estavel de backup.
+
+          PRIMEIRO TESTE
+          --------------
+          Inicie o Tahoe sem uma instancia antiga de com.rtw88.driver carregada.
+
+          Dentro desta pasta:
+            chmod +x ./test-v908e-load-on-tahoe.sh
+            ./test-v908e-load-on-tahoe.sh ./rtw88.kext ./rtw88ctl
+
+          O log fica em:
+            ~/rtw88-v908e-load-test.txt
+
+          RESULTADO ESPERADO NESTA ETAPA
+          ------------------------------
+          O sucesso da v9.0.8 NAO significa Wi-Fi nativo pronto.
+
+          Sucesso significa:
+          - kmutil return code 0
+          - com.rtw88.driver 9.0.8 carregado
+          - RTW88PCIDevice aparece no IORegistry
+          - sem kernel panic
+          - idealmente rtw88ctl ainda encontra o driver
+
+          Depois disso a proxima etapa e implementar o bridge Apple80211/Skywalk:
+          POWER, STATE, SSID, CHANNEL, RSSI, SCAN, SCAN_RESULT, AUTH,
+          ASSOCIATE e DISASSOCIATE em etapas pequenas.
+          EOF
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          OUT="${GITHUB_WORKSPACE}/${BUILD_NAME}"
+          rm -rf "${OUT}"
+          mkdir -p "${OUT}"
+
+          cp -R build/out/rtw88.kext "${OUT}/"
+          cp build/out/rtw88ctl "${OUT}/"
+          cp build/out/test-v908e-load-on-tahoe.sh "${OUT}/"
+          cp build/out/LEIA-ME-v9.0.8e.txt "${OUT}/"
+
+          cp src/kext/RTW88PCIDevice.hpp "${OUT}/RTW88PCIDevice-v9.0.8e.hpp"
+          cp src/kext/RTW88PCIDevice.cpp "${OUT}/RTW88PCIDevice-v9.0.8e.cpp"
+
+          (
+            cd "${OUT}"
+            shasum -a 256 \
+              rtw88.kext/Contents/MacOS/rtw88 \
+              rtw88ctl \
+              test-v908e-load-on-tahoe.sh \
+              > SHA256SUMS.txt
+          )
+
+          find "${OUT}" -maxdepth 3 -type f -print | sort
+
+      - name: Zip artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent \
+            "${BUILD_NAME}" \
+            "${BUILD_NAME}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}
+          path: |
+            ${{ env.BUILD_NAME }}
+            ${{ env.BUILD_NAME }}.zip
+          if-no-files-found: error
