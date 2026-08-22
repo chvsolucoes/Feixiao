@@ -1,0 +1,1107 @@
+name: RTW88 v13.0.1 Split Native C-API Bridge
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build stable rtw88 + isolated native bridge
+    runs-on: macos-26
+
+    env:
+      FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+      RTW88_REF: d029a677c49266fad86750714eb5612becd134d3
+      ITLWM_REF: 53c51c2cdd6e4b69beb91f310d74c53422b0f8bd
+      BUILD_NAME: RTW88-v13.0.1-Split-Native-CAPI-Bridge
+
+    steps:
+      - name: Checkout Feixiao stable
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/Feixiao
+          ref: ${{ env.FEIXIAO_REF }}
+          path: Feixiao
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Checkout rtw88-stable
+        uses: actions/checkout@v4
+        with:
+          repository: thegwchr/rtw88-stable
+          ref: ${{ env.RTW88_REF }}
+          path: rtw88-stable
+          fetch-depth: 1
+
+      - name: Checkout AirportItlwm headers
+        uses: actions/checkout@v4
+        with:
+          repository: OpenIntelWireless/itlwm
+          ref: ${{ env.ITLWM_REF }}
+          path: itlwm
+          fetch-depth: 1
+
+      - name: Preflight source layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Feixiao/src/kext/RTW88PCIDevice.cpp
+          test -f Feixiao/src/kext/RTW88PCIDevice.hpp
+          test -f Feixiao/src/kext/RTW88IEEE80211.cpp
+          test -f Feixiao/src/kext/RTW88IEEE80211.hpp
+          test -f Feixiao/src/kext/RTW88UserClient.hpp
+          test -f Feixiao/Makefile
+          test -f Feixiao/rtw88.kext/Contents/Info.plist
+          test -f itlwm/include/Airport/IO80211ControllerV2.h
+          echo "Source layout: OK"
+
+      - name: Verify pinned revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C Feixiao rev-parse HEAD)" = "${FEIXIAO_REF}"
+          test "$(git -C rtw88-stable rev-parse HEAD)" = "${RTW88_REF}"
+          test "$(git -C itlwm rev-parse HEAD)" = "${ITLWM_REF}"
+
+      - name: Preserve stable driver architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          H="src/kext/RTW88PCIDevice.hpp"
+          P="rtw88.kext/Contents/Info.plist"
+
+          grep -F 'class RTW88PCIDevice : public IOEthernetController' "${H}" >/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTL8821CE:IOClass' "${P}")" = "RTW88PCIDevice"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTL8821CE:IOProviderClass' "${P}")" = "IOPCIDevice"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTL8821CE:IOPCIMatch' "${P}")" = "0xC82110EC"
+
+          echo "Stable architecture preserved: PCI -> RTW88PCIDevice : IOEthernetController"
+
+      - name: Set stable package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+          P="rtw88.kext/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 8.5.3" "${P}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 8.5.3" "${P}"
+          plutil -lint "${P}"
+
+      - name: Download and validate Realtek firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p Feixiao/firmware
+          BASE="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw88"
+
+          for fw in \
+            rtw8822b_fw.bin \
+            rtw8822c_fw.bin \
+            rtw8821c_fw.bin \
+            rtw8821a_fw.bin \
+            rtw8812a_fw.bin \
+            rtw8814a_fw.bin
+          do
+            echo "Downloading ${fw}..."
+            curl -L --fail --retry 3 --retry-delay 2 \
+              "${BASE}/${fw}" \
+              -o "Feixiao/firmware/${fw}"
+
+            test -s "Feixiao/firmware/${fw}"
+            SIZE="$(stat -f%z "Feixiao/firmware/${fw}")"
+            echo "${fw}: ${SIZE} bytes"
+
+            if [ "${SIZE}" -lt 4096 ]; then
+              echo "FATAL: ${fw} is unexpectedly small"
+              exit 40
+            fi
+          done
+
+          echo "RTL8821CE firmware SHA256:"
+          shasum -a 256 Feixiao/firmware/rtw8821c_fw.bin
+
+          rm -f Feixiao/src/compat/fw_blobs.c
+          echo "Firmware validation: OK"
+
+      - name: Add startup-stage diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("src/kext/RTW88PCIDevice.cpp")
+          s = p.read_text()
+
+          reps = [
+              (
+                  '    if (!super::start(provider)) return false;',
+                  '    IOLog("rtw88: v13.0 START stage=super\\n");\n'
+                  '    if (!super::start(provider)) {\n'
+                  '        IOLog("rtw88: v13.0 FAIL stage=super\\n");\n'
+                  '        return false;\n'
+                  '    }\n'
+                  '    IOLog("rtw88: v13.0 OK stage=super\\n");'
+              ),
+              (
+                  '    _pciDev = OSDynamicCast(IOPCIDevice, provider);',
+                  '    IOLog("rtw88: v13.0 START stage=pci-cast\\n");\n'
+                  '    _pciDev = OSDynamicCast(IOPCIDevice, provider);'
+              ),
+              (
+                  '    _mmioMap = _pciDev->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);',
+                  '    IOLog("rtw88: v13.0 START stage=bar2\\n");\n'
+                  '    _mmioMap = _pciDev->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);'
+              ),
+              (
+                  '    rtw88_compat_init();',
+                  '    IOLog("rtw88: v13.0 START stage=compat-init\\n");\n'
+                  '    rtw88_compat_init();\n'
+                  '    IOLog("rtw88: v13.0 OK stage=compat-init\\n");'
+              ),
+              (
+                  '    if (!setupInterrupt()) {',
+                  '    IOLog("rtw88: v13.0 START stage=interrupt\\n");\n'
+                  '    if (!setupInterrupt()) {'
+              ),
+              (
+                  '    rtw88_find_fw_dir();',
+                  '    IOLog("rtw88: v13.0 START stage=firmware-dir\\n");\n'
+                  '    rtw88_find_fw_dir();\n'
+                  '    IOLog("rtw88: v13.0 OK stage=firmware-dir\\n");'
+              ),
+              (
+                  '    _ieee80211 = RTW88IEEE80211::create(this, _compatPciDev);',
+                  '    IOLog("rtw88: v13.0 START stage=ieee-create\\n");\n'
+                  '    _ieee80211 = RTW88IEEE80211::create(this, _compatPciDev);'
+              ),
+              (
+                  '    IOReturn probeRet = _ieee80211->start();',
+                  '    IOLog("rtw88: v13.0 START stage=ieee-probe\\n");\n'
+                  '    IOReturn probeRet = _ieee80211->start();'
+              ),
+              (
+                  '    if (!attachDevice()) return false;',
+                  '    IOLog("rtw88: v13.0 OK stage=ieee-probe\\n");\n'
+                  '    IOLog("rtw88: v13.0 START stage=attach-interface\\n");\n'
+                  '    if (!attachDevice()) {\n'
+                  '        IOLog("rtw88: v13.0 FAIL stage=attach-interface\\n");\n'
+                  '        return false;\n'
+                  '    }\n'
+                  '    IOLog("rtw88: v13.0 OK stage=attach-interface\\n");'
+              ),
+              (
+                  '    IOLog("rtw88: device started successfully\\n");',
+                  '    IOLog("rtw88: v13.0 READY RTL8821CE backend service\\n");\n'
+                  '    IOLog("rtw88: device started successfully\\n");'
+              ),
+          ]
+
+          for old, new in reps:
+              if old not in s:
+                  raise SystemExit(f"FATAL: startup anchor not found: {old[:80]}")
+              s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+
+          grep -n "rtw88: v13.0" src/kext/RTW88PCIDevice.cpp
+
+      - name: Add stable C API export to backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          cat > src/kext/RTW88BridgeAPI.hpp <<'EOF'
+          #pragma once
+          #include <IOKit/IOTypes.h>
+
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+
+          struct RTW88BridgeState {
+              UInt32 state;
+              UInt8 bssid[6];
+              char ssid[33];
+              SInt32 rssi;
+              UInt32 channel;
+              UInt8 mac[6];
+              UInt8 powered;
+          };
+
+          IOReturn rtw88_bridge_power_on(void);
+          IOReturn rtw88_bridge_power_off(void);
+          IOReturn rtw88_bridge_scan(void);
+          IOReturn rtw88_bridge_disconnect(void);
+          IOReturn rtw88_bridge_connect(const char *ssid, const char *password);
+          IOReturn rtw88_bridge_get_state(struct RTW88BridgeState *out);
+          IOReturn rtw88_bridge_get_rssi(SInt32 *out);
+
+          #ifdef __cplusplus
+          }
+          #endif
+          EOF
+
+          cat > src/kext/RTW88BridgeAPI.cpp <<'EOF'
+          #include "RTW88BridgeAPI.hpp"
+          #include "RTW88PCIDevice.hpp"
+          #include "RTW88IEEE80211.hpp"
+          #include "RTW88UserClient.hpp"
+          #include <libkern/libkern.h>
+          #include <libkern/OSAtomic.h>
+
+          extern "C" RTW88PCIDevice *rtw88_get_current_pci_device(void);
+
+          static RTW88PCIDevice *bridgeDev()
+          {
+              return rtw88_get_current_pci_device();
+          }
+
+          extern "C" IOReturn rtw88_bridge_power_on(void)
+          {
+              RTW88PCIDevice *d = bridgeDev();
+              if (!d || !d->get80211()) return kIOReturnNotReady;
+              return d->get80211()->cmdPowerOn();
+          }
+
+          extern "C" IOReturn rtw88_bridge_power_off(void)
+          {
+              RTW88PCIDevice *d = bridgeDev();
+              if (!d || !d->get80211()) return kIOReturnNotReady;
+              d->get80211()->cmdDisconnect();
+              return d->get80211()->cmdPowerOff();
+          }
+
+          extern "C" IOReturn rtw88_bridge_scan(void)
+          {
+              RTW88PCIDevice *d = bridgeDev();
+              if (!d || !d->get80211()) return kIOReturnNotReady;
+              return d->get80211()->cmdScan();
+          }
+
+          extern "C" IOReturn rtw88_bridge_disconnect(void)
+          {
+              RTW88PCIDevice *d = bridgeDev();
+              if (!d || !d->get80211()) return kIOReturnNotReady;
+              return d->get80211()->cmdDisconnect();
+          }
+
+          extern "C" IOReturn rtw88_bridge_connect(const char *ssid, const char *password)
+          {
+              RTW88PCIDevice *d = bridgeDev();
+              if (!d || !d->get80211() || !ssid) return kIOReturnNotReady;
+              return d->get80211()->cmdConnect(ssid, password ? password : "");
+          }
+
+          extern "C" IOReturn rtw88_bridge_get_state(struct RTW88BridgeState *out)
+          {
+              if (!out) return kIOReturnBadArgument;
+              RTW88PCIDevice *d = bridgeDev();
+              if (!d || !d->get80211()) return kIOReturnNotReady;
+
+              RTW88StateResult st = {};
+              IOReturn ret = d->get80211()->cmdGetState(&st);
+              if (ret != kIOReturnSuccess) return ret;
+
+              memset(out, 0, sizeof(*out));
+              out->state = st.state;
+              memcpy(out->bssid, st.bssid, sizeof(out->bssid));
+              strlcpy(out->ssid, st.ssid, sizeof(out->ssid));
+              out->rssi = st.rssi;
+              out->channel = st.channel;
+              memcpy(out->mac, st.mac_addr, sizeof(out->mac));
+              out->powered = st.powered;
+              return kIOReturnSuccess;
+          }
+
+          extern "C" IOReturn rtw88_bridge_get_rssi(SInt32 *out)
+          {
+              if (!out) return kIOReturnBadArgument;
+              RTW88PCIDevice *d = bridgeDev();
+              if (!d || !d->get80211()) return kIOReturnNotReady;
+              int rssi = -100;
+              IOReturn ret = d->get80211()->cmdGetRSSI(&rssi);
+              *out = rssi;
+              return ret;
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/kext/RTW88PCIDevice.cpp")
+          s = p.read_text()
+          anchor = "static RTW88PCIDevice *g_pci_dev_instance = nullptr;"
+          if anchor not in s:
+              raise SystemExit("FATAL: g_pci_dev_instance anchor not found")
+          addition = '''
+          extern "C" RTW88PCIDevice *rtw88_get_current_pci_device(void)
+          {
+              return g_pci_dev_instance;
+          }
+          '''
+          if "rtw88_get_current_pci_device" not in s:
+              s = s.replace(anchor, anchor + "\n" + addition, 1)
+          p.write_text(s)
+
+          m = Path("Makefile")
+          t = m.read_text()
+          anchor2 = "    $(KEXT_SRC)/RTW88PCIDevice.cpp \\\n"
+          if anchor2 not in t:
+              raise SystemExit("FATAL: Makefile source anchor not found")
+          if "$(KEXT_SRC)/RTW88BridgeAPI.cpp" not in t:
+              t = t.replace(anchor2, anchor2 + "    $(KEXT_SRC)/RTW88BridgeAPI.cpp \\\n", 1)
+          m.write_text(t)
+          PY
+
+          grep -F 'RTW88BridgeAPI.cpp' Makefile >/dev/null
+          grep -F 'rtw88_get_current_pci_device' src/kext/RTW88PCIDevice.cpp >/dev/null
+
+      - name: Build working rtw88 backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+          make clean
+          make -j1 all
+
+          test -f build/out/rtw88.kext/Contents/MacOS/rtw88
+          test -f build/out/rtw88ctl
+          test -f src/compat/fw_blobs.c
+
+          grep -F 'rtw8821c_fw.bin' src/compat/fw_blobs.c >/dev/null
+
+          if [ "$(wc -c < src/compat/fw_blobs.c)" -lt 10000 ]; then
+            echo "FATAL: fw_blobs.c is too small; firmware was not embedded"
+            exit 41
+          fi
+
+          echo "Embedded firmware blob size:"
+          wc -c src/compat/fw_blobs.c
+
+          P="build/out/rtw88.kext/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${P}")" = "8.5.3"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTL8821CE:IOClass' "${P}")" = "RTW88PCIDevice"
+
+          echo "Stable rtw88.kext built."
+
+      - name: Create isolated native bridge source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native/src native/rtw88native.kext/Contents/MacOS
+
+          cat > native/src/RTW88BridgeAPI.hpp <<'EOF'
+          #pragma once
+          #include <IOKit/IOTypes.h>
+
+          struct RTW88BridgeState {
+              UInt32 state;
+              UInt8 bssid[6];
+              char ssid[33];
+              SInt32 rssi;
+              UInt32 channel;
+              UInt8 mac[6];
+              UInt8 powered;
+          };
+
+          extern "C" IOReturn rtw88_bridge_power_on(void);
+          extern "C" IOReturn rtw88_bridge_power_off(void);
+          extern "C" IOReturn rtw88_bridge_scan(void);
+          extern "C" IOReturn rtw88_bridge_disconnect(void);
+          extern "C" IOReturn rtw88_bridge_connect(const char *, const char *);
+          extern "C" IOReturn rtw88_bridge_get_state(struct RTW88BridgeState *);
+          extern "C" IOReturn rtw88_bridge_get_rssi(SInt32 *);
+          EOF
+
+          cat > native/src/RTW88NativeController.hpp <<'EOF'
+          #pragma once
+
+          #include "Apple80211.h"
+          #include "RTW88BridgeAPI.hpp"
+
+          class RTW88NativeController : public IO80211Controller {
+              OSDeclareDefaultStructors(RTW88NativeController)
+
+          public:
+              bool init(OSDictionary *dict = nullptr) override;
+              bool start(IOService *provider) override;
+              void stop(IOService *provider) override;
+              void free() override;
+
+              bool isCommandProhibited(int) override;
+              SInt32 handleCardSpecific(IO80211SkywalkInterface *, unsigned long, void *, bool) override;
+              SInt32 enableFeature(IO80211FeatureCode, void *) override;
+
+              IOReturn getDRIVER_VERSION(IO80211SkywalkInterface *, apple80211_version_data *) override;
+              IOReturn getHARDWARE_VERSION(IO80211SkywalkInterface *, apple80211_version_data *) override;
+              IOReturn getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple80211_capability_data *) override;
+              IOReturn getPOWER(IO80211SkywalkInterface *, apple80211_power_data *) override;
+              IOReturn setPOWER(IO80211SkywalkInterface *, apple80211_power_data *) override;
+              IOReturn getCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *) override;
+              IOReturn setCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *) override;
+              IOReturn setGET_DEBUG_INFO(IO80211SkywalkInterface *, apple80211_debug_command *) override;
+
+              void postMessage(UInt, void *, unsigned long, UInt, void *) override;
+              bool createWorkQueue() override;
+              IO80211WorkQueue *getWorkQueue() override;
+
+              UInt32 getFeatures() const override;
+              bool requiresExplicitMBufRelease() override;
+              bool flowIdSupported() override;
+              SInt32 monitorModeSetEnabled(bool, UInt) override;
+              IOReturn requestQueueSizeAndTimeout(unsigned short *, unsigned short *) override;
+              bool getLogPipes(CCPipe **, CCPipe **, CCPipe **) override;
+              void *getFaultReporterFromDriver() override;
+
+              SInt32 apple80211SkywalkRequest(UInt requestType, int requestNumber,
+                                              IO80211SkywalkInterface *iface,
+                                              void *data) override;
+              SInt32 apple80211SkywalkRequest(UInt requestType, int requestNumber,
+                                              IO80211SkywalkInterface *iface,
+                                              void *data, void *extra) override;
+
+              bool useAppleRSNSupplicant(IO80211VirtualInterface *) override;
+              IOReturn enable(IO80211SkywalkInterface *) override;
+              IOReturn disable(IO80211SkywalkInterface *) override;
+
+          private:
+              IO80211WorkQueue *_wq = nullptr;
+              bool _power = true;
+              char _ssid[33] = {};
+              char _password[64] = {};
+          };
+          EOF
+
+          cat > native/src/RTW88NativeController.cpp <<'EOF'
+          #include "RTW88NativeController.hpp"
+          #include <IOKit/IOLib.h>
+          #include <libkern/libkern.h>
+
+          #define super IO80211Controller
+          OSDefineMetaClassAndStructors(RTW88NativeController, IO80211Controller)
+
+          bool RTW88NativeController::init(OSDictionary *dict)
+          {
+              return super::init(dict);
+          }
+
+          bool RTW88NativeController::start(IOService *provider)
+          {
+              IOLog("rtw88native: start provider=%p\n", provider);
+
+              if (!provider || strcmp(provider->getMetaClass()->getClassName(), "RTW88PCIDevice") != 0) {
+                  IOLog("rtw88native: provider is not RTW88PCIDevice\n");
+                  return false;
+              }
+
+              RTW88BridgeState st = {};
+              if (rtw88_bridge_get_state(&st) != kIOReturnSuccess) {
+                  IOLog("rtw88native: backend C API not ready\n");
+                  return false;
+              }
+
+              _wq = IO80211WorkQueue::workQueue();
+              if (!_wq) {
+                  IOLog("rtw88native: workqueue creation failed\n");
+                  return false;
+              }
+
+              UInt8 builtIn = 0;
+              OSData *data = OSData::withBytes(&builtIn, sizeof(builtIn));
+              if (data) {
+                  setProperty("built-in", data);
+                  data->release();
+              }
+              setProperty("DriverKitDriver", kOSBooleanFalse);
+
+              IOLog("rtw88native: calling IO80211Controller::start\n");
+              bool ok = super::start(provider);
+              IOLog("rtw88native: IO80211Controller::start returned %d\n", ok ? 1 : 0);
+
+              if (!ok) {
+                  _wq->release();
+                  _wq = nullptr;
+                  return false;
+              }
+
+              registerService();
+              IOLog("rtw88native: native controller ready\n");
+              return true;
+          }
+
+          void RTW88NativeController::stop(IOService *provider)
+          {
+              IOLog("rtw88native: stop\n");
+              if (_wq) { _wq->release(); _wq = nullptr; }
+              super::stop(provider);
+          }
+
+          void RTW88NativeController::free()
+          {
+              super::free();
+          }
+
+          bool RTW88NativeController::isCommandProhibited(int) { return false; }
+          SInt32 RTW88NativeController::handleCardSpecific(IO80211SkywalkInterface *, unsigned long, void *, bool)
+          { return kIOReturnUnsupported; }
+          SInt32 RTW88NativeController::enableFeature(IO80211FeatureCode, void *)
+          { return kIOReturnSuccess; }
+
+          bool RTW88NativeController::createWorkQueue()
+          {
+              IOLog("rtw88native: createWorkQueue -> %p\n", _wq);
+              return _wq != nullptr;
+          }
+
+          IO80211WorkQueue *RTW88NativeController::getWorkQueue()
+          {
+              return _wq;
+          }
+
+          void RTW88NativeController::postMessage(UInt, void *, unsigned long, UInt, void *) {}
+
+          UInt32 RTW88NativeController::getFeatures() const { return 0; }
+          bool RTW88NativeController::requiresExplicitMBufRelease() { return false; }
+          bool RTW88NativeController::flowIdSupported() { return false; }
+          SInt32 RTW88NativeController::monitorModeSetEnabled(bool, UInt) { return kIOReturnSuccess; }
+          IOReturn RTW88NativeController::requestQueueSizeAndTimeout(unsigned short *, unsigned short *)
+          { return kIOReturnSuccess; }
+          bool RTW88NativeController::getLogPipes(CCPipe **a, CCPipe **b, CCPipe **c)
+          {
+              if (a) *a = nullptr;
+              if (b) *b = nullptr;
+              if (c) *c = nullptr;
+              return false;
+          }
+          void *RTW88NativeController::getFaultReporterFromDriver() { return nullptr; }
+
+          IOReturn RTW88NativeController::getDRIVER_VERSION(
+              IO80211SkywalkInterface *, apple80211_version_data *d)
+          {
+              if (!d) return kIOReturnBadArgument;
+              memset(d, 0, sizeof(*d));
+              d->version = APPLE80211_VERSION;
+              strlcpy((char *)d->string, "RTW88 Native Bridge 13.0.1", sizeof(d->string));
+              return kIOReturnSuccess;
+          }
+
+          IOReturn RTW88NativeController::getHARDWARE_VERSION(
+              IO80211SkywalkInterface *, apple80211_version_data *d)
+          {
+              if (!d) return kIOReturnBadArgument;
+              memset(d, 0, sizeof(*d));
+              d->version = APPLE80211_VERSION;
+              strlcpy((char *)d->string, "Realtek RTL8821CE", sizeof(d->string));
+              return kIOReturnSuccess;
+          }
+
+          IOReturn RTW88NativeController::getCARD_CAPABILITIES(
+              IO80211SkywalkInterface *, apple80211_capability_data *d)
+          {
+              if (!d) return kIOReturnBadArgument;
+              memset(d, 0, sizeof(*d));
+              d->version = APPLE80211_VERSION;
+              d->capabilities[0] = 0xff;
+              d->capabilities[1] = 0xff;
+              d->capabilities[2] = 0xff;
+              d->capabilities[3] = 0x2b;
+              d->capabilities[5] = 0x40;
+              d->capabilities[6] = 0x8c;
+              return kIOReturnSuccess;
+          }
+
+          IOReturn RTW88NativeController::getPOWER(
+              IO80211SkywalkInterface *, apple80211_power_data *d)
+          {
+              if (!d) return kIOReturnBadArgument;
+              memset(d, 0, sizeof(*d));
+              d->version = APPLE80211_VERSION;
+              d->num_radios = 1;
+              d->power_state[0] = _power ? APPLE80211_POWER_ON : APPLE80211_POWER_OFF;
+              return kIOReturnSuccess;
+          }
+
+          IOReturn RTW88NativeController::setPOWER(
+              IO80211SkywalkInterface *iface, apple80211_power_data *d)
+          {
+              if (!d) return kIOReturnBadArgument;
+              return (d->power_state[0] == APPLE80211_POWER_ON) ? enable(iface) : disable(iface);
+          }
+
+          IOReturn RTW88NativeController::getCOUNTRY_CODE(
+              IO80211SkywalkInterface *, apple80211_country_code_data *d)
+          {
+              if (!d) return kIOReturnBadArgument;
+              memset(d, 0, sizeof(*d));
+              d->version = APPLE80211_VERSION;
+              d->cc[0] = 'B'; d->cc[1] = 'R';
+              return kIOReturnSuccess;
+          }
+
+          IOReturn RTW88NativeController::setCOUNTRY_CODE(
+              IO80211SkywalkInterface *, apple80211_country_code_data *)
+          { return kIOReturnSuccess; }
+
+          IOReturn RTW88NativeController::setGET_DEBUG_INFO(
+              IO80211SkywalkInterface *, apple80211_debug_command *)
+          { return kIOReturnSuccess; }
+
+          bool RTW88NativeController::useAppleRSNSupplicant(IO80211VirtualInterface *)
+          {
+              return false;
+          }
+
+          IOReturn RTW88NativeController::enable(IO80211SkywalkInterface *)
+          {
+              IOLog("rtw88native: power ON\n");
+              _power = true;
+              return rtw88_bridge_power_on();
+          }
+
+          IOReturn RTW88NativeController::disable(IO80211SkywalkInterface *)
+          {
+              IOLog("rtw88native: power OFF\n");
+              _power = false;
+              rtw88_bridge_disconnect();
+              return rtw88_bridge_power_off();
+          }
+
+          SInt32 RTW88NativeController::apple80211SkywalkRequest(
+              UInt requestType, int requestNumber,
+              IO80211SkywalkInterface *iface, void *data, void *)
+          {
+              return apple80211SkywalkRequest(requestType, requestNumber, iface, data);
+          }
+
+          SInt32 RTW88NativeController::apple80211SkywalkRequest(
+              UInt requestType, int requestNumber,
+              IO80211SkywalkInterface *iface, void *data)
+          {
+              RTW88BridgeState st = {};
+              if (rtw88_bridge_get_state(&st) != kIOReturnSuccess)
+                  return kIOReturnNotReady;
+
+              switch (requestNumber) {
+              case APPLE80211_IOC_POWER:
+                  return requestType == SIOCGA80211
+                      ? getPOWER(iface, (apple80211_power_data *)data)
+                      : setPOWER(iface, (apple80211_power_data *)data);
+
+              case APPLE80211_IOC_SCAN_REQ:
+              case APPLE80211_IOC_SCAN_REQ_MULTIPLE:
+                  IOLog("rtw88native: native scan\n");
+                  return rtw88_bridge_scan();
+
+              case APPLE80211_IOC_STATE: {
+                  if (!data) return kIOReturnBadArgument;
+                  apple80211_state_data *sd = (apple80211_state_data *)data;
+                  memset(sd, 0, sizeof(*sd));
+                  sd->version = APPLE80211_VERSION;
+                  if (st.state == RTW88_STATE_CONNECTED) sd->state = 4;
+                  else if (st.state == RTW88_STATE_SCANNING) sd->state = 1;
+                  else if (st.state == RTW88_STATE_AUTHENTICATING ||
+                           st.state == RTW88_STATE_ASSOCIATING ||
+                           st.state == RTW88_STATE_HANDSHAKING) sd->state = 3;
+                  else sd->state = 0;
+                  return kIOReturnSuccess;
+              }
+
+              case APPLE80211_IOC_SSID: {
+                  if (!data) return kIOReturnBadArgument;
+                  apple80211_ssid_data *sd = (apple80211_ssid_data *)data;
+                  if (requestType == SIOCGA80211) {
+                      memset(sd, 0, sizeof(*sd));
+                      sd->version = APPLE80211_VERSION;
+                      size_t n = strnlen(st.ssid, 32);
+                      memcpy(sd->ssid_bytes, st.ssid, n);
+                      sd->ssid_len = (uint32_t)n;
+                  } else {
+                      memset(_ssid, 0, sizeof(_ssid));
+                      size_t n = sd->ssid_len > 32 ? 32 : sd->ssid_len;
+                      memcpy(_ssid, sd->ssid_bytes, n);
+                  }
+                  return kIOReturnSuccess;
+              }
+
+              case APPLE80211_IOC_BSSID: {
+                  if (!data || requestType != SIOCGA80211) return kIOReturnUnsupported;
+                  apple80211_bssid_data *bd = (apple80211_bssid_data *)data;
+                  memset(bd, 0, sizeof(*bd));
+                  bd->version = APPLE80211_VERSION;
+                  memcpy(&bd->bssid, st.bssid, 6);
+                  return kIOReturnSuccess;
+              }
+
+              case APPLE80211_IOC_RSSI: {
+                  if (!data) return kIOReturnBadArgument;
+                  apple80211_rssi_data *rd = (apple80211_rssi_data *)data;
+                  int rssi = -100;
+                  rtw88_bridge_get_rssi((SInt32 *)&rssi);
+                  memset(rd, 0, sizeof(*rd));
+                  rd->version = APPLE80211_VERSION;
+                  rd->num_radios = 1;
+                  rd->rssi_unit = APPLE80211_UNIT_DBM;
+                  rd->rssi[0] = rssi;
+                  rd->aggregate_rssi = rssi;
+                  rd->rssi_ext[0] = rssi;
+                  rd->aggregate_rssi_ext = rssi;
+                  return kIOReturnSuccess;
+              }
+
+              case APPLE80211_IOC_CHANNEL: {
+                  if (!data || requestType != SIOCGA80211) return kIOReturnUnsupported;
+                  apple80211_channel_data *cd = (apple80211_channel_data *)data;
+                  memset(cd, 0, sizeof(*cd));
+                  cd->version = APPLE80211_VERSION;
+                  cd->channel.channel = st.channel;
+                  return kIOReturnSuccess;
+              }
+
+              case APPLE80211_IOC_PHY_MODE: {
+                  if (!data) return kIOReturnBadArgument;
+                  apple80211_phymode_data *pd = (apple80211_phymode_data *)data;
+                  memset(pd, 0, sizeof(*pd));
+                  pd->version = APPLE80211_VERSION;
+                  pd->phy_mode = APPLE80211_MODE_11A |
+                                 APPLE80211_MODE_11B |
+                                 APPLE80211_MODE_11G |
+                                 APPLE80211_MODE_11N |
+                                 APPLE80211_MODE_11AC;
+                  pd->active_phy_mode =
+                      (st.channel > 14) ? APPLE80211_MODE_11AC : APPLE80211_MODE_11N;
+                  return kIOReturnSuccess;
+              }
+
+              case APPLE80211_IOC_OP_MODE: {
+                  if (!data) return kIOReturnBadArgument;
+                  apple80211_opmode_data *od = (apple80211_opmode_data *)data;
+                  memset(od, 0, sizeof(*od));
+                  od->version = APPLE80211_VERSION;
+                  od->op_mode = APPLE80211_M_STA;
+                  return kIOReturnSuccess;
+              }
+
+              case APPLE80211_IOC_DISASSOCIATE:
+                  return rtw88_bridge_disconnect();
+
+              /*
+               * Association password translation from Apple's private RSN path
+               * is intentionally not faked.  The stable backend remains intact.
+               */
+              case APPLE80211_IOC_ASSOCIATE:
+                  if (!_ssid[0]) return kIOReturnNotReady;
+                  return rtw88_bridge_connect(_ssid, _password);
+
+              case APPLE80211_IOC_CARD_CAPABILITIES:
+                  return getCARD_CAPABILITIES(iface, (apple80211_capability_data *)data);
+              case APPLE80211_IOC_DRIVER_VERSION:
+                  return getDRIVER_VERSION(iface, (apple80211_version_data *)data);
+              case APPLE80211_IOC_HARDWARE_VERSION:
+                  return getHARDWARE_VERSION(iface, (apple80211_version_data *)data);
+              case APPLE80211_IOC_COUNTRY_CODE:
+                  return requestType == SIOCGA80211
+                      ? getCOUNTRY_CODE(iface, (apple80211_country_code_data *)data)
+                      : setCOUNTRY_CODE(iface, (apple80211_country_code_data *)data);
+
+              case APPLE80211_IOC_P2P_LISTEN:
+              case APPLE80211_IOC_P2P_SCAN:
+              case APPLE80211_IOC_P2P_GO_CONF:
+                  return kIOReturnUnsupported;
+
+              default:
+                  IOLog("rtw88native: unhandled request=%d type=%u\n",
+                        requestNumber, requestType);
+                  return kIOReturnUnsupported;
+              }
+          }
+          EOF
+
+          cat > native/src/kmod_info.c <<'EOF'
+          #include <mach/mach_types.h>
+          #include <libkern/libkern.h>
+          #include <sys/types.h>
+          #include <mach/kmod.h>
+
+          kern_return_t rtw88native_start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
+          kern_return_t rtw88native_stop(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
+
+          KMOD_EXPLICIT_DECL(com_rtw88_native, "13.0.1",
+                             rtw88native_start, rtw88native_stop)
+          __private_extern__ kmod_start_func_t *_realmain = rtw88native_start;
+          __private_extern__ kmod_stop_func_t *_antimain = rtw88native_stop;
+          __private_extern__ int _kext_apple_cc = __APPLE_CC__;
+          EOF
+
+      - name: Create native bridge Info.plist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > native/rtw88native.kext/Contents/Info.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>English</string>
+            <key>CFBundleExecutable</key><string>rtw88native</string>
+            <key>CFBundleIdentifier</key><string>com.rtw88.native</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>rtw88native</string>
+            <key>CFBundlePackageType</key><string>KEXT</string>
+            <key>CFBundleShortVersionString</key><string>13.0.1</string>
+            <key>CFBundleVersion</key><string>13.0.1</string>
+
+            <key>IOKitPersonalities</key>
+            <dict>
+              <key>RTW88NativeController</key>
+              <dict>
+                <key>CFBundleIdentifier</key><string>com.rtw88.native</string>
+                <key>IOClass</key><string>RTW88NativeController</string>
+                <key>IOProviderClass</key><string>RTW88PCIDevice</string>
+                <key>IOMatchCategory</key><string>WiFiDriver</string>
+                <key>IONetworkRootType</key><string>airport</string>
+                <key>IOProbeScore</key><integer>6000</integer>
+              </dict>
+            </dict>
+
+            <key>OSBundleLibraries</key>
+            <dict>
+              <key>com.rtw88.driver</key><string>8.5.3</string>
+              <key>com.apple.driver.corecapture</key><string>1.0.0</string>
+              <key>com.apple.iokit.IO80211Family</key><string>1.5.0</string>
+              <key>com.apple.iokit.IOSkywalkFamily</key><string>1.0</string>
+              <key>com.apple.iokit.IONetworkingFamily</key><string>3.2</string>
+              <key>com.apple.iokit.IOPCIFamily</key><string>2.9</string>
+              <key>com.apple.kpi.bsd</key><string>16.7</string>
+              <key>com.apple.kpi.iokit</key><string>16.7</string>
+              <key>com.apple.kpi.libkern</key><string>16.7</string>
+              <key>com.apple.kpi.mach</key><string>16.7</string>
+            </dict>
+
+          </dict>
+          </plist>
+          EOF
+
+          plutil -lint native/rtw88native.kext/Contents/Info.plist
+
+      - name: Build isolated native bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="$(xcrun --show-sdk-path)"
+          MKSDK="$PWD/Feixiao/MacKernelSDK"
+
+          CXXFLAGS=(
+            -fno-exceptions -fno-rtti -fno-stack-protector -mkernel
+            -arch x86_64 -mmacosx-version-min=11.0
+            -isysroot "$SDK"
+            -I"$MKSDK/Headers"
+            -I"$SDK/System/Library/Frameworks/Kernel.framework/Headers"
+            -I"$PWD/itlwm/include/Airport"
+            -I"$PWD/itlwm/include"
+            -I"$PWD/Feixiao/src/compat"
+            -I"$PWD/Feixiao/src/compat/linux"
+            -fapple-kext -std=c++17
+            -DKERNEL -DIO80211FAMILY_V2=1 -D__IO80211_TARGET=__MAC_11_0
+            -Wno-deprecated-declarations
+            -Wno-nullability-completeness
+          )
+
+          CFLAGS=(
+            -fno-stack-protector -mkernel
+            -arch x86_64 -mmacosx-version-min=11.0
+            -isysroot "$SDK"
+            -I"$MKSDK/Headers"
+            -I"$SDK/System/Library/Frameworks/Kernel.framework/Headers"
+          )
+
+          mkdir -p native/build
+
+          xcrun clang++ "${CXXFLAGS[@]}" \
+            -c native/src/RTW88NativeController.cpp \
+            -o native/build/RTW88NativeController.o
+
+          xcrun clang "${CFLAGS[@]}" \
+            -c native/src/kmod_info.c \
+            -o native/build/kmod_info.o
+
+          xcrun clang++ \
+            -arch x86_64 \
+            -static -nostdlib -Xlinker -kext \
+            "$MKSDK/Library/x86_64/libkmod.a" \
+            "$MKSDK/Library/universal/libkmodc++.a" \
+            -F"$SDK/System/Library/Frameworks" \
+            -o native/rtw88native.kext/Contents/MacOS/rtw88native \
+            native/build/RTW88NativeController.o \
+            native/build/kmod_info.o
+
+          test -f native/rtw88native.kext/Contents/MacOS/rtw88native
+          file native/rtw88native.kext/Contents/MacOS/rtw88native
+          nm native/rtw88native.kext/Contents/MacOS/rtw88native | c++filt | \
+            grep -F 'RTW88NativeController::start(' >/dev/null
+
+          echo "===== C API imports ====="
+          nm -u native/rtw88native.kext/Contents/MacOS/rtw88native | \
+            grep 'rtw88_bridge_' | sort -u
+
+          if nm -u native/rtw88native.kext/Contents/MacOS/rtw88native | c++filt | \
+             grep -E 'RTW88PCIDevice::|RTW88IEEE80211::'; then
+            echo "FATAL: native bridge still imports backend C++ symbols"
+            exit 81
+          fi
+
+      - name: Verify stable driver was not converted
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Feixiao
+
+          grep -F 'class RTW88PCIDevice : public IOEthernetController' \
+            src/kext/RTW88PCIDevice.hpp >/dev/null
+
+          BIN="build/out/rtw88.kext/Contents/MacOS/rtw88"
+          nm "${BIN}" | c++filt | grep -F 'RTW88PCIDevice::start(' >/dev/null
+
+          if nm "${BIN}" | c++filt | grep -F 'RTW88PCIWrapper::' >/dev/null; then
+            echo "FATAL: wrapper leaked into stable driver"
+            exit 1
+          fi
+
+          for sym in \
+            rtw88_bridge_power_on \
+            rtw88_bridge_power_off \
+            rtw88_bridge_scan \
+            rtw88_bridge_disconnect \
+            rtw88_bridge_connect \
+            rtw88_bridge_get_state \
+            rtw88_bridge_get_rssi
+          do
+            nm "${BIN}" | grep -E "[[:space:]]_${sym}$" >/dev/null || {
+              echo "FATAL: missing backend C API export ${sym}"
+              exit 82
+            }
+          done
+
+          echo "Stable driver remains independent and exports the bridge C API."
+
+          echo "===== backend exported bridge symbols ====="
+          nm "${BIN}" | grep -E '_rtw88_bridge_(power_on|power_off|scan|disconnect|connect|get_state|get_rssi)$' | sort
+
+          echo "===== backend class still IOEthernetController ====="
+          grep -F 'class RTW88PCIDevice : public IOEthernetController' src/kext/RTW88PCIDevice.hpp
+
+      - name: Validate native bridge for OpenCore injection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          P="native/rtw88native.kext/Contents/Info.plist"
+          B="native/rtw88native.kext/Contents/MacOS/rtw88native"
+
+          plutil -lint "${P}"
+
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${P}")" = "com.rtw88.native"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTW88NativeController:IOProviderClass' "${P}")" = "RTW88PCIDevice"
+
+          if /usr/libexec/PlistBuddy -c 'Print :OSBundleRequired' "${P}" >/dev/null 2>&1; then
+            echo "FATAL: native bridge must not use OSBundleRequired in this build"
+            exit 61
+          fi
+
+          if /usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:RTW88NativeController:IOResourceMatch' "${P}" >/dev/null 2>&1; then
+            echo "FATAL: native bridge must not be gated by IOResourceMatch"
+            exit 62
+          fi
+
+          echo "Undefined symbols in native bridge:"
+          nm -u "${B}" | c++filt | sed -n '1,220p'
+
+          echo
+          echo "Backend dependency:"
+          /usr/libexec/PlistBuddy -c 'Print :OSBundleLibraries:com.rtw88.driver' "${P}"
+
+          echo
+          echo "Native bridge OpenCore injection validation: OK"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package
+
+          cp -R Feixiao/build/out/rtw88.kext package/
+          cp -R native/rtw88native.kext package/
+          cp Feixiao/build/out/rtw88ctl package/
+
+          cat > package/LEIA-ME.txt <<'EOF'
+          RTW88 v13.0.1 — SPLIT NATIVE C-API BRIDGE
+
+          Esta versão mantém duas Kexts.
+
+          1. rtw88.kext
+             Backend funcional já comprovado:
+             PCI / firmware / scan / WPA2 / TX / RX.
+
+             Ela exporta somente uma API C pequena para a bridge.
+
+          2. rtw88native.kext
+             IO80211ControllerV2.
+             Não importa RTW88PCIDevice.hpp nem RTW88IEEE80211.hpp.
+             Não linka diretamente métodos C++ internos do backend.
+             Usa somente:
+               rtw88_bridge_power_on
+               rtw88_bridge_power_off
+               rtw88_bridge_scan
+               rtw88_bridge_disconnect
+               rtw88_bridge_connect
+               rtw88_bridge_get_state
+               rtw88_bridge_get_rssi
+
+          OPENCORE
+          --------
+          EFI/OC/Kexts:
+            1. rtw88.kext
+            2. rtw88native.kext
+
+          Faça OC Snapshot e mantenha essa ordem.
+
+          TESTE
+          -----
+          kmutil showloaded | grep -Ei 'rtw88|IO80211'
+
+          Alvo:
+            com.rtw88.driver (8.5.3)
+            com.rtw88.native (13.0.1)
+
+          Depois:
+            ioreg -p IOService -l -w0 | grep -E 'RTW88PCIDevice|RTW88NativeController'
+
+          O backend deve continuar funcionando pelo rtw88ctl mesmo se a bridge
+          nativa falhar.
+
+          AirDrop/AWDL não implementado.
+          Bluetooth Realtek USB é separado.
+          EOF
+
+          shasum -a 256 \
+            package/rtw88.kext/Contents/MacOS/rtw88 \
+            package/rtw88native.kext/Contents/MacOS/rtw88native \
+            package/rtw88ctl > package/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}
+          path: package
+          if-no-files-found: error
