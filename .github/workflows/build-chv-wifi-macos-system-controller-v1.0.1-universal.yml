@@ -1,0 +1,772 @@
+name: Build CHV WiFi Native macOS Controller v1.0.1
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build CHV WiFi system controller
+    runs-on: macos-15
+
+    steps:
+      - name: Create project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src build "package/CHV WiFi.app/Contents/MacOS" "package/CHV WiFi.app/Contents/Resources"
+
+          cat > src/RTW88Client.h <<'EOF'
+          #pragma once
+          #import <Foundation/Foundation.h>
+
+          typedef struct {
+              uint32_t state;
+              uint8_t  bssid[6];
+              char     ssid[33];
+              int32_t  rssi;
+              uint32_t channel;
+              uint8_t  mac_addr[6];
+              uint16_t fw_version;
+              uint8_t  fw_sub_version;
+              char     chip_name[32];
+              uint32_t rx_byte_count;
+              uint32_t tx_byte_count;
+              uint8_t  scan_offload_supported;
+              uint8_t  powered;
+          } RTW88StateResult;
+
+          @interface RTW88Network : NSObject
+          @property(nonatomic, copy) NSString *ssid;
+          @property(nonatomic, copy) NSString *bssid;
+          @property(nonatomic) NSInteger rssi;
+          @property(nonatomic) NSInteger channel;
+          @property(nonatomic) uint32_t cipher;
+          @end
+
+          @interface RTW88Client : NSObject
+          @property(nonatomic, readonly) BOOL available;
+          - (BOOL)open;
+          - (void)close;
+          - (BOOL)powerOn;
+          - (BOOL)powerOff;
+          - (BOOL)disconnect;
+          - (BOOL)connectSSID:(NSString *)ssid password:(NSString *)password;
+          - (nullable RTW88StateResult *)stateMalloc;
+          - (NSArray<RTW88Network *> *)scan;
+          @end
+          EOF
+
+          cat > src/RTW88Client.m <<'EOF'
+          #import "RTW88Client.h"
+          #import <IOKit/IOKitLib.h>
+
+          enum {
+              kRTW88Scan        = 0,
+              kRTW88Connect     = 1,
+              kRTW88Disconnect  = 2,
+              kRTW88GetState    = 3,
+              kRTW88GetBSSList  = 4,
+              kRTW88GetRSSI     = 5,
+              kRTW88SetDebug    = 6,
+              kRTW88GetLog      = 7,
+              kRTW88PowerOn     = 8,
+              kRTW88PowerOff    = 9
+          };
+
+          typedef struct {
+              char ssid[33];
+              char password[64];
+          } RTW88ConnectArgs;
+
+          @implementation RTW88Network
+          @end
+
+          @interface RTW88Client () {
+              io_connect_t _conn;
+              BOOL _available;
+          }
+          @end
+
+          @implementation RTW88Client
+
+          - (instancetype)init {
+              self = [super init];
+              if (self) {
+                  _conn = IO_OBJECT_NULL;
+                  _available = NO;
+              }
+              return self;
+          }
+
+          - (BOOL)available { return _available; }
+
+          - (BOOL)open {
+              if (_conn != IO_OBJECT_NULL) return YES;
+
+              io_service_t svc = IOServiceGetMatchingService(
+                  kIOMainPortDefault,
+                  IOServiceMatching("RTW88PCIDevice")
+              );
+              if (!svc) {
+                  _available = NO;
+                  return NO;
+              }
+
+              kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &_conn);
+              IOObjectRelease(svc);
+              _available = (kr == KERN_SUCCESS && _conn != IO_OBJECT_NULL);
+              return _available;
+          }
+
+          - (void)close {
+              if (_conn != IO_OBJECT_NULL) {
+                  IOServiceClose(_conn);
+                  _conn = IO_OBJECT_NULL;
+              }
+              _available = NO;
+          }
+
+          - (BOOL)callNoData:(uint32_t)selector {
+              if (![self open]) return NO;
+              kern_return_t kr = IOConnectCallStructMethod(
+                  _conn, selector, NULL, 0, NULL, NULL
+              );
+              return kr == KERN_SUCCESS;
+          }
+
+          - (BOOL)powerOn { return [self callNoData:kRTW88PowerOn]; }
+          - (BOOL)powerOff { return [self callNoData:kRTW88PowerOff]; }
+          - (BOOL)disconnect { return [self callNoData:kRTW88Disconnect]; }
+
+          - (BOOL)connectSSID:(NSString *)ssid password:(NSString *)password {
+              if (![self open]) return NO;
+
+              RTW88ConnectArgs a = {};
+              NSData *s = [ssid dataUsingEncoding:NSUTF8StringEncoding];
+              NSData *p = [password dataUsingEncoding:NSUTF8StringEncoding];
+              NSUInteger sl = MIN((NSUInteger)32, s.length);
+              NSUInteger pl = MIN((NSUInteger)63, p.length);
+              memcpy(a.ssid, s.bytes, sl);
+              memcpy(a.password, p.bytes, pl);
+
+              size_t outSize = 0;
+              kern_return_t kr = IOConnectCallStructMethod(
+                  _conn, kRTW88Connect, &a, sizeof(a), NULL, &outSize
+              );
+              return kr == KERN_SUCCESS;
+          }
+
+          - (nullable RTW88StateResult *)stateMalloc {
+              if (![self open]) return NULL;
+
+              RTW88StateResult *st = calloc(1, sizeof(RTW88StateResult));
+              size_t outSize = sizeof(RTW88StateResult);
+              kern_return_t kr = IOConnectCallStructMethod(
+                  _conn, kRTW88GetState, NULL, 0, st, &outSize
+              );
+              if (kr != KERN_SUCCESS || outSize < sizeof(RTW88StateResult)) {
+                  free(st);
+                  return NULL;
+              }
+              return st;
+          }
+
+          - (NSArray<RTW88Network *> *)scan {
+              if (![self open]) return @[];
+
+              size_t noOut = 0;
+              kern_return_t kr = IOConnectCallStructMethod(
+                  _conn, kRTW88Scan, NULL, 0, NULL, &noOut
+              );
+              if (kr != KERN_SUCCESS) return @[];
+
+              // Scan is async in Feixiao. Poll state for up to ~4.5 sec.
+              for (int i = 0; i < 45; i++) {
+                  usleep(100000);
+                  RTW88StateResult *st = [self stateMalloc];
+                  if (st) {
+                      uint32_t state = st->state;
+                      free(st);
+                      if (state != 1) break; // RTW88_STATE_SCANNING == 1
+                  }
+              }
+
+              uint8_t buf[4096] = {};
+              size_t outSize = sizeof(buf);
+              kr = IOConnectCallStructMethod(
+                  _conn, kRTW88GetBSSList, NULL, 0, buf, &outSize
+              );
+              if (kr != KERN_SUCCESS || outSize < 4) return @[];
+
+              uint32_t total = 0;
+              memcpy(&total, buf, 4);
+              if (total > outSize) total = (uint32_t)outSize;
+
+              NSMutableArray<RTW88Network *> *result = [NSMutableArray array];
+              uint32_t pos = 4;
+
+              while (pos < total) {
+                  uint8_t ssidLen = buf[pos++];
+                  if (ssidLen > 32 || pos + ssidLen + 13 > total) break;
+
+                  NSData *ssidData = [NSData dataWithBytes:&buf[pos] length:ssidLen];
+                  NSString *ssid = [[NSString alloc] initWithData:ssidData
+                                                         encoding:NSUTF8StringEncoding];
+                  pos += ssidLen;
+
+                  uint8_t *b = &buf[pos];
+                  NSString *bssid = [NSString stringWithFormat:
+                      @"%02x:%02x:%02x:%02x:%02x:%02x",
+                      b[0],b[1],b[2],b[3],b[4],b[5]];
+                  pos += 6;
+
+                  int16_t rssi = (int16_t)((buf[pos] << 8) | buf[pos+1]);
+                  pos += 2;
+
+                  uint8_t channel = buf[pos++];
+
+                  uint32_t cipher = 0;
+                  memcpy(&cipher, &buf[pos], 4);
+                  pos += 4;
+
+                  if (!ssid || ssid.length == 0) continue;
+
+                  RTW88Network *n = [RTW88Network new];
+                  n.ssid = ssid;
+                  n.bssid = bssid;
+                  n.rssi = rssi;
+                  n.channel = channel;
+                  n.cipher = cipher;
+                  [result addObject:n];
+              }
+
+              // Strongest duplicate SSID first.
+              [result sortUsingComparator:^NSComparisonResult(RTW88Network *a, RTW88Network *b) {
+                  if (a.rssi > b.rssi) return NSOrderedAscending;
+                  if (a.rssi < b.rssi) return NSOrderedDescending;
+                  return [a.ssid compare:b.ssid];
+              }];
+
+              NSMutableArray *dedup = [NSMutableArray array];
+              NSMutableSet *seen = [NSMutableSet set];
+              for (RTW88Network *n in result) {
+                  if (![seen containsObject:n.ssid]) {
+                      [seen addObject:n.ssid];
+                      [dedup addObject:n];
+                  }
+              }
+              return dedup;
+          }
+
+          @end
+          EOF
+
+          cat > src/Keychain.h <<'EOF'
+          #pragma once
+          #import <Foundation/Foundation.h>
+          NSString *CHVLoadPassword(NSString *ssid);
+          BOOL CHVSavePassword(NSString *ssid, NSString *password);
+          EOF
+
+          cat > src/Keychain.m <<'EOF'
+          #import "Keychain.h"
+          #import <Security/Security.h>
+
+          static NSString * const kService = @"com.chvsolucoes.wifi";
+
+          NSString *CHVLoadPassword(NSString *ssid) {
+              NSDictionary *q = @{
+                  (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                  (__bridge id)kSecAttrService: kService,
+                  (__bridge id)kSecAttrAccount: ssid,
+                  (__bridge id)kSecReturnData: @YES,
+                  (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+              };
+              CFTypeRef out = NULL;
+              OSStatus s = SecItemCopyMatching((__bridge CFDictionaryRef)q, &out);
+              if (s != errSecSuccess || !out) return nil;
+              NSData *d = CFBridgingRelease(out);
+              return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+          }
+
+          BOOL CHVSavePassword(NSString *ssid, NSString *password) {
+              NSData *d = [password dataUsingEncoding:NSUTF8StringEncoding];
+              NSDictionary *q = @{
+                  (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                  (__bridge id)kSecAttrService: kService,
+                  (__bridge id)kSecAttrAccount: ssid
+              };
+              SecItemDelete((__bridge CFDictionaryRef)q);
+              NSMutableDictionary *add = [q mutableCopy];
+              add[(__bridge id)kSecValueData] = d;
+              return SecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess;
+          }
+          EOF
+
+          cat > src/main.m <<'EOF'
+          #import <Cocoa/Cocoa.h>
+          #import "RTW88Client.h"
+          #import "Keychain.h"
+
+          @interface AppDelegate : NSObject <NSApplicationDelegate>
+          @property(nonatomic,strong) NSStatusItem *status;
+          @property(nonatomic,strong) NSMenu *menu;
+          @property(nonatomic,strong) RTW88Client *client;
+          @property(nonatomic,strong) NSTimer *timer;
+          @property(nonatomic,strong) NSArray<RTW88Network *> *networks;
+          @end
+
+          @implementation AppDelegate
+
+          - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+              self.client = [RTW88Client new];
+              [self.client open];
+
+              self.status = [[NSStatusBar systemStatusBar]
+                  statusItemWithLength:NSSquareStatusItemLength];
+
+              if (@available(macOS 11.0, *)) {
+                  self.status.button.image =
+                      [NSImage imageWithSystemSymbolName:@"wifi"
+                               accessibilityDescription:@"CHV Wi-Fi"];
+              } else {
+                  self.status.button.title = @"WiFi";
+              }
+
+              self.menu = [NSMenu new];
+              self.status.menu = self.menu;
+              [self rebuildMenu];
+
+              self.timer = [NSTimer scheduledTimerWithTimeInterval:3.0
+                                                            target:self
+                                                          selector:@selector(refreshStatus)
+                                                          userInfo:nil
+                                                           repeats:YES];
+          }
+
+          - (void)refreshStatus {
+              [self rebuildMenu];
+          }
+
+          - (NSString *)stateLabel:(uint32_t)s {
+              switch (s) {
+                  case 0: return @"Desconectado";
+                  case 1: return @"Procurando redes…";
+                  case 2: return @"Autenticando…";
+                  case 3: return @"Associando…";
+                  case 4: return @"Conectando WPA2…";
+                  case 5: return @"Conectado";
+                  case 6: return @"Desconectando…";
+                  default: return @"Estado desconhecido";
+              }
+          }
+
+          - (void)rebuildMenu {
+              [self.menu removeAllItems];
+
+              RTW88StateResult *st = [self.client stateMalloc];
+
+              NSMenuItem *title = [[NSMenuItem alloc] initWithTitle:@"CHV Wi-Fi"
+                                                            action:nil
+                                                     keyEquivalent:@""];
+              title.enabled = NO;
+              [self.menu addItem:title];
+
+              if (!st) {
+                  NSMenuItem *e = [[NSMenuItem alloc]
+                      initWithTitle:@"Driver RTW88 não encontrado"
+                             action:nil keyEquivalent:@""];
+                  e.enabled = NO;
+                  [self.menu addItem:e];
+                  [self.menu addItem:[NSMenuItem separatorItem]];
+                  [self addQuit];
+                  return;
+              }
+
+              NSString *ssid = [NSString stringWithUTF8String:st->ssid] ?: @"";
+              NSString *state = [self stateLabel:st->state];
+
+              NSString *statusText = ssid.length
+                  ? [NSString stringWithFormat:@"%@ — %@ (%d dBm)", state, ssid, st->rssi]
+                  : state;
+
+              NSMenuItem *s = [[NSMenuItem alloc] initWithTitle:statusText
+                                                        action:nil
+                                                 keyEquivalent:@""];
+              s.enabled = NO;
+              [self.menu addItem:s];
+
+              BOOL powered = st->powered != 0;
+              free(st);
+
+              NSMenuItem *power = [[NSMenuItem alloc]
+                  initWithTitle:(powered ? @"Desligar Wi-Fi" : @"Ligar Wi-Fi")
+                         action:@selector(togglePower:)
+                  keyEquivalent:@""];
+              power.target = self;
+              power.representedObject = @(powered);
+              [self.menu addItem:power];
+
+              NSMenuItem *scan = [[NSMenuItem alloc]
+                  initWithTitle:@"Procurar redes"
+                         action:@selector(scan:)
+                  keyEquivalent:@"r"];
+              scan.target = self;
+              [self.menu addItem:scan];
+
+              NSMenuItem *disc = [[NSMenuItem alloc]
+                  initWithTitle:@"Desconectar"
+                         action:@selector(disconnect:)
+                  keyEquivalent:@""];
+              disc.target = self;
+              [self.menu addItem:disc];
+
+              if (self.networks.count) {
+                  [self.menu addItem:[NSMenuItem separatorItem]];
+                  NSMenuItem *hdr = [[NSMenuItem alloc] initWithTitle:@"Redes disponíveis"
+                                                               action:nil
+                                                        keyEquivalent:@""];
+                  hdr.enabled = NO;
+                  [self.menu addItem:hdr];
+
+                  for (RTW88Network *n in self.networks) {
+                      NSString *band = n.channel > 14 ? @"5 GHz" : @"2.4 GHz";
+                      NSString *lock = n.cipher ? @"  🔒" : @"";
+                      NSString *label = [NSString stringWithFormat:@"%@   %ld dBm   %@%@",
+                                         n.ssid, (long)n.rssi, band, lock];
+
+                      NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:label
+                                                                 action:@selector(connectNetwork:)
+                                                          keyEquivalent:@""];
+                      mi.target = self;
+                      mi.representedObject = n;
+                      [self.menu addItem:mi];
+                  }
+              }
+
+              [self.menu addItem:[NSMenuItem separatorItem]];
+
+              NSMenuItem *openSettings = [[NSMenuItem alloc]
+                  initWithTitle:@"Abrir Ajustes de Rede"
+                         action:@selector(openNetworkSettings:)
+                  keyEquivalent:@""];
+              openSettings.target = self;
+              [self.menu addItem:openSettings];
+
+              [self addQuit];
+          }
+
+          - (void)addQuit {
+              NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Sair do CHV Wi-Fi"
+                                                            action:@selector(terminate:)
+                                                     keyEquivalent:@"q"];
+              quit.target = NSApp;
+              [self.menu addItem:quit];
+          }
+
+          - (void)togglePower:(NSMenuItem *)sender {
+              BOOL powered = [sender.representedObject boolValue];
+              if (powered) [self.client powerOff];
+              else [self.client powerOn];
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+                             dispatch_get_main_queue(), ^{
+                  [self rebuildMenu];
+              });
+          }
+
+          - (void)disconnect:(id)sender {
+              [self.client disconnect];
+              [self rebuildMenu];
+          }
+
+          - (void)scan:(id)sender {
+              if (@available(macOS 11.0, *)) {
+                  self.status.button.image =
+                      [NSImage imageWithSystemSymbolName:@"wifi.exclamationmark"
+                               accessibilityDescription:@"Procurando redes"];
+              }
+
+              dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                  NSArray *nets = [self.client scan];
+                  dispatch_async(dispatch_get_main_queue(), ^{
+                      self.networks = nets;
+                      if (@available(macOS 11.0, *)) {
+                          self.status.button.image =
+                              [NSImage imageWithSystemSymbolName:@"wifi"
+                                           accessibilityDescription:@"CHV Wi-Fi"];
+                      }
+                      [self rebuildMenu];
+                      [self.status.button performClick:nil];
+                  });
+              });
+          }
+
+          - (void)connectNetwork:(NSMenuItem *)sender {
+              RTW88Network *net = sender.representedObject;
+              if (!net) return;
+
+              NSString *password = CHVLoadPassword(net.ssid);
+              if (!password && net.cipher != 0) {
+                  NSAlert *a = [NSAlert new];
+                  a.messageText = [NSString stringWithFormat:@"Conectar a “%@”", net.ssid];
+                  a.informativeText = @"Digite a senha do Wi-Fi:";
+                  [a addButtonWithTitle:@"Conectar"];
+                  [a addButtonWithTitle:@"Cancelar"];
+
+                  NSSecureTextField *field =
+                      [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0,0,280,24)];
+                  a.accessoryView = field;
+
+                  if ([a runModal] != NSAlertFirstButtonReturn) return;
+                  password = field.stringValue ?: @"";
+                  if (password.length == 0) return;
+                  CHVSavePassword(net.ssid, password);
+              }
+
+              if (!password) password = @"";
+
+              [self.client disconnect];
+              usleep(150000);
+              [self.client connectSSID:net.ssid password:password];
+              [self rebuildMenu];
+          }
+
+          - (void)openNetworkSettings:(id)sender {
+              NSURL *url = [NSURL URLWithString:
+                  @"x-apple.systempreferences:com.apple.Network-Settings.extension"];
+              [[NSWorkspace sharedWorkspace] openURL:url];
+          }
+
+          @end
+
+          int main(int argc, const char * argv[]) {
+              @autoreleasepool {
+                  NSApplication *app = [NSApplication sharedApplication];
+                  AppDelegate *delegate = [AppDelegate new];
+                  app.delegate = delegate;
+                  [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+                  [app run];
+              }
+              return 0;
+          }
+          EOF
+
+          cat > "package/CHV WiFi.app/Contents/Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>pt_BR</string>
+            <key>CFBundleExecutable</key><string>CHV WiFi</string>
+            <key>CFBundleIdentifier</key><string>com.chvsolucoes.wifi</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>CHV WiFi</string>
+            <key>CFBundleDisplayName</key><string>CHV WiFi</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0.1</string>
+            <key>CFBundleVersion</key><string>2</string>
+            <key>LSUIElement</key><true/>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Build native menu bar app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+
+          echo "Building x86_64 binary for Intel Hackintosh..."
+          clang \
+            -arch x86_64 \
+            -fobjc-arc \
+            -fblocks \
+            -mmacosx-version-min=12.0 \
+            -isysroot "$SDK" \
+            -framework Cocoa \
+            -framework IOKit \
+            -framework Security \
+            src/main.m src/RTW88Client.m src/Keychain.m \
+            -o build/chv-wifi-x86_64
+
+          echo "Building arm64 binary for Apple Silicon..."
+          clang \
+            -arch arm64 \
+            -fobjc-arc \
+            -fblocks \
+            -mmacosx-version-min=12.0 \
+            -isysroot "$SDK" \
+            -framework Cocoa \
+            -framework IOKit \
+            -framework Security \
+            src/main.m src/RTW88Client.m src/Keychain.m \
+            -o build/chv-wifi-arm64
+
+          echo "Creating Universal 2 application..."
+          lipo -create \
+            build/chv-wifi-x86_64 \
+            build/chv-wifi-arm64 \
+            -output "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+
+          chmod +x "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+
+          echo "Architectures:"
+          lipo -archs "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+          file "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+
+          ARCHS="$(lipo -archs "package/CHV WiFi.app/Contents/MacOS/CHV WiFi")"
+          echo "$ARCHS" | grep -qw x86_64
+          echo "$ARCHS" | grep -qw arm64
+
+          codesign --force --deep --sign - "package/CHV WiFi.app"
+          codesign --verify --deep --strict "package/CHV WiFi.app"
+          plutil -lint "package/CHV WiFi.app/Contents/Info.plist"
+
+      - name: Create installer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > package/Install.command <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          APP_SRC="$HERE/CHV WiFi.app"
+          APP_DST="/Applications/CHV WiFi.app"
+          AGENT="$HOME/Library/LaunchAgents/com.chvsolucoes.wifi.plist"
+
+          if [ ! -d "$APP_SRC" ]; then
+            echo "CHV WiFi.app não encontrado."
+            exit 1
+          fi
+
+          echo "Instalando CHV WiFi..."
+          rm -rf "$APP_DST"
+          cp -R "$APP_SRC" "$APP_DST"
+
+          mkdir -p "$HOME/Library/LaunchAgents"
+
+          cat > "$AGENT" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key><string>com.chvsolucoes.wifi</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/Applications/CHV WiFi.app/Contents/MacOS/CHV WiFi</string>
+            </array>
+            <key>RunAtLoad</key><true/>
+            <key>KeepAlive</key><false/>
+            <key>ProcessType</key><string>Interactive</string>
+          </dict>
+          </plist>
+          PLIST
+
+          launchctl bootout "gui/$(id -u)" "$AGENT" >/dev/null 2>&1 || true
+          launchctl bootstrap "gui/$(id -u)" "$AGENT"
+          launchctl kickstart -k "gui/$(id -u)/com.chvsolucoes.wifi"
+
+          echo
+          echo "Instalado."
+          echo "O ícone Wi-Fi do CHV aparecerá na barra de menus."
+          EOF
+          chmod +x package/Install.command
+
+          cat > package/Uninstall.command <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          AGENT="$HOME/Library/LaunchAgents/com.chvsolucoes.wifi.plist"
+          launchctl bootout "gui/$(id -u)" "$AGENT" >/dev/null 2>&1 || true
+          rm -f "$AGENT"
+          rm -rf "/Applications/CHV WiFi.app"
+          echo "CHV WiFi removido."
+          EOF
+          chmod +x package/Uninstall.command
+
+          cat > package/LEIA-ME.txt <<'EOF'
+          CHV WiFi 1.0.1
+          ===============
+
+          OBJETIVO
+          --------
+          Controlar a RTL8821CE pelo macOS sem usar Terminal no dia a dia.
+
+          Este aplicativo fala DIRETAMENTE com RTW88PCIDevice através do
+          IOUserClient do driver. Ele não chama rtw88ctl em subprocesso.
+
+          COMPATIBILIDADE
+          ---------------
+          Esta versão é Universal 2:
+          - x86_64 para Hackintosh Intel;
+          - arm64 para Macs Apple Silicon.
+
+          A versão 1.0.0 podia ser gerada somente para a arquitetura do runner
+          do GitHub Actions, causando a mensagem "não é compatível com este tipo
+          de Mac" em máquinas Intel.
+
+          FUNÇÕES
+          -------
+          - Ícone nativo na barra de menus do macOS.
+          - Ligar/desligar o rádio.
+          - Procurar redes.
+          - Exibir SSID, RSSI, banda 2.4/5 GHz e segurança.
+          - Conectar clicando na rede.
+          - Pedir senha em janela nativa.
+          - Salvar senha no Keychain do macOS.
+          - Desconectar.
+          - Iniciar automaticamente ao entrar no macOS.
+
+          PRÉ-REQUISITO
+          -------------
+          A rtw88.kext funcional deve continuar no OpenCore.
+
+          INSTALAÇÃO
+          ----------
+          Dê duplo clique em Install.command.
+
+          IMPORTANTE
+          ----------
+          Isto cria um controle gráfico nativo do macOS para o backend RTW88.
+
+          Não substitui internamente o painel Apple "Ajustes > Wi-Fi", porque
+          esse painel exige um driver completo IO80211/Skywalk. O Feixiao atual
+          é um IOEthernetController e não fornece toda essa ABI privada.
+
+          A vantagem deste método é preservar o driver que já funciona e
+          remover a necessidade de digitar comandos no Terminal.
+
+          AirDrop/AWDL e Bluetooth não fazem parte desta ferramenta.
+          EOF
+
+          shasum -a 256 \
+            "package/CHV WiFi.app/Contents/MacOS/CHV WiFi" \
+            package/Install.command \
+            package/Uninstall.command > package/SHA256SUMS.txt
+
+      - name: Smoke test bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+          test -x package/Install.command
+          test -x package/Uninstall.command
+          file "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+          lipo -archs "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+          lipo -verify_arch x86_64 arm64 "package/CHV WiFi.app/Contents/MacOS/CHV WiFi"
+          codesign -dv --verbose=2 "package/CHV WiFi.app" 2>&1 | head -30
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CHV-WiFi-macOS-System-Controller-v1.0.1
+          path: package
+          if-no-files-found: error
