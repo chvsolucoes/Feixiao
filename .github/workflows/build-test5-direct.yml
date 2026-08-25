@@ -1,0 +1,80 @@
+name: Build TEST5 Connect Stable Direct
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-test5-direct.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      FEIXIAO_REF: e963f43188382eced4ef2fa75d19ce4db2315c68
+      RTW88_REF: df655c7be129768b4243381c2a2170ceba45eeb0
+    steps:
+      - name: Checkout CHV build sources
+        uses: actions/checkout@v4
+
+      - name: Generate TEST5 definition from generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -ryaml -e 'd=YAML.load_file(".github/workflows/generate-test5-connect-stable-v2.yml"); s=d["jobs"]["generate"]["steps"].find{|x| x["name"]=="Generate TEST5 workflow"}; abort "generator step missing" unless s; File.write("/tmp/chv-gen-test5.sh",s["run"])'
+          bash -euo pipefail /tmp/chv-gen-test5.sh
+          test -f .github/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml
+          grep -q 'v1.9.3 Connect Stable' .github/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml
+          grep -q 'MGMT5G-TEST5-CONNECT-STABLE-RXTAG' .github/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml
+
+      - name: Checkout pinned upstream source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf Feixiao rtw88-stable
+          git clone --no-checkout https://github.com/thegwchr/Feixiao.git Feixiao
+          git -C Feixiao checkout "$FEIXIAO_REF"
+          git -C Feixiao submodule update --init --recursive
+          git clone --no-checkout https://github.com/thegwchr/rtw88-stable.git rtw88-stable
+          git -C rtw88-stable checkout "$RTW88_REF"
+          test "$(git -C Feixiao rev-parse HEAD)" = "$FEIXIAO_REF"
+          test "$(git -C rtw88-stable rev-parse HEAD)" = "$RTW88_REF"
+
+      - name: Execute TEST5 build steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f /tmp/test5-step-*.sh
+          ruby -ryaml <<'RB'
+          d=YAML.load_file('.github/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml')
+          steps=d['jobs']['build']['steps']
+          n=0
+          steps.each do |s|
+            next unless s['run']
+            n += 1
+            File.write(sprintf('/tmp/test5-step-%03d.sh',n), s['run'])
+          end
+          puts "Prepared #{n} TEST5 shell steps"
+          RB
+          export GITHUB_ENV=/tmp/chv-github-env
+          : > "$GITHUB_ENV"
+          for f in /tmp/test5-step-*.sh; do
+            echo "===== Running $f ====="
+            bash -euo pipefail "$f"
+            if [ -s "$GITHUB_ENV" ]; then
+              set -a
+              . "$GITHUB_ENV"
+              set +a
+            fi
+          done
+          test -d package
+          find package -maxdepth 2 -type f -print
+
+      - name: Upload TEST5 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CHV-WiFi-Connect-Stable-v1.9.3
+          path: package
+          if-no-files-found: error
