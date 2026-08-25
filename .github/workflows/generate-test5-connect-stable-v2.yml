@@ -1,0 +1,101 @@
+name: Generate TEST5 Connect Stable v2
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/generate-test5-connect-stable-v2.yml"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate TEST5 workflow
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/build-chv-wifi-dmg-v1.9.2-mgmt5g-rxtag-trace.yml')
+          o=Path('.github/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml')
+          s=p.read_text()
+          for a,b in [
+            ('name: Build CHV WiFi DMG Installer v1.9.2 MGMT5G RX Tag Trace','name: Build CHV WiFi DMG Installer v1.9.3 Connect Stable'),
+            ('.github/workflows/build-chv-wifi-dmg-v1.9.2-mgmt5g-rxtag-trace.yml','.github/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml'),
+            ('Build RTL8821CE rtw88.kext 8.5.7 MGMT5G TEST4 RX Tag Trace','Build RTL8821CE rtw88.kext 8.5.8 MGMT5G TEST5 Connect Stable'),
+            ('Set :CFBundleVersion 8.5.7','Set :CFBundleVersion 8.5.8'),
+            ('Set :CFBundleShortVersionString 8.5.7','Set :CFBundleShortVersionString 8.5.8'),
+            ('MGMT5G-TEST4-RXTAG-TRACE','MGMT5G-TEST5-CONNECT-STABLE-RXTAG'),
+            ('= "8.5.7"','= "8.5.8"'),
+            ('App: v1.9.2 MGMT5G RX Tag Trace','App: v1.9.3 Connect Stable'),
+            ('Driver esperado: 8.5.7 MGMT5G-TEST4-RXTAG-TRACE','Driver esperado: 8.5.8 MGMT5G-TEST5-CONNECT-STABLE-RXTAG'),
+            ('<string>1.9.2</string>','<string>1.9.3</string>'),
+            ('<string>23</string>','<string>24</string>'),
+            ('CHV-WiFi-MGMT5G-RXTag-Trace-v1.9.2','CHV-WiFi-Connect-Stable-v1.9.3'),
+            ('CHV-WiFi-MGMT5G-RXTAG-Trace-v1.9.2','CHV-WiFi-Connect-Stable-v1.9.3')]:
+              s=s.replace(a,b)
+
+          lines=[
+            '      - name: Apply TEST5 connection stability patch',
+            '        shell: bash',
+            '        run: |',
+            "          python3 <<'P2'",
+            '          from pathlib import Path',
+            '          c=Path("Feixiao/src/kext/RTW88IEEE80211.cpp")',
+            '          h=Path("Feixiao/src/kext/RTW88IEEE80211.hpp")',
+            '          x=c.read_text(); y=h.read_text()',
+            '          y=y.replace("    uint8_t  _authRetryCount = 0;  /* VHT80 test: bounded auth retries          */\\n    bool     _force40Fallback = false; /* fallback after repeated 80 MHz failure */", "    uint8_t  _authRetryCount = 0;  /* bounded auth retries */\\n    uint8_t  _assocRetryCount = 0; /* 2.4/5 GHz recovery */\\n    bool     _force40Fallback = false;",1)',
+            '          old="    RTW88BSS *target = nullptr;\\n    for (RTW88BSS *b = _bssList; b; b = b->next) {\\n        if (strlen(b->ssid) == strlen(ssid) &&\\n            memcmp(b->ssid, ssid, strlen(ssid)) == 0) {\\n            target = b;\\n            break;\\n        }\\n    }"',
+            '          new="    RTW88BSS *target = nullptr;\\n    for (RTW88BSS *b = _bssList; b; b = b->next) {\\n        if (strlen(b->ssid) == strlen(ssid) &&\\n            memcmp(b->ssid, ssid, strlen(ssid)) == 0) {\\n            if (!target || b->last_seen_scan > target->last_seen_scan || (b->last_seen_scan == target->last_seen_scan && b->rssi > target->rssi)) target = b;\\n        }\\n    }"',
+            '          assert old in x; x=x.replace(old,new,1)',
+            '          x=x.replace("_authRetryCount >= 4","_authRetryCount >= 6",1)',
+            '          x=x.replace("    _authRetryCount = 0;\\n    _force40Fallback = false;", "    _authRetryCount = 0;\\n    _assocRetryCount = 0;\\n    _force40Fallback = false;",1)',
+            '          old="        } else {\\n            IOLog(\\\"rtw88: assoc timeout\\\\n\\\");\\n            _state = RTW88_STATE_IDLE;\\n        }\\n        break;"',
+            '          new="        } else if (_assocRetryCount < 5) {\\n            _assocRetryCount++; _authRetryCount = 0;\\n            IOLog(\\\"rtw88: TEST5 assoc retry=%u band=%s ch=%u\\\\n\\\", _assocRetryCount, (_targetBSS.channel > 14) ? \\\"5G\\\" : \\\"2.4G\\\", _targetBSS.channel);\\n            _state = RTW88_STATE_AUTHENTICATING; doAuthenticate();\\n        } else {\\n            _state = RTW88_STATE_IDLE;\\n        }\\n        break;"',
+            '          assert old in x; x=x.replace(old,new,1)',
+            '          old="        IOLog(\\\"rtw88: assoc failed status=%u\\\\n\\\", status);\\n        _state = RTW88_STATE_IDLE;\\n        return;"',
+            '          new="        if (_assocRetryCount < 5) {\\n            _assocRetryCount++; _authRetryCount = 0;\\n            IOLog(\\\"rtw88: TEST5 assoc rejected status=%u retry=%u\\\\n\\\", status, _assocRetryCount);\\n            _state = RTW88_STATE_AUTHENTICATING;\\n            if (_connectTC) thread_call_enter(_connectTC); return;\\n        }\\n        _state = RTW88_STATE_IDLE; return;"',
+            '          assert old in x; x=x.replace(old,new,1)',
+            '          c.write_text(x); h.write_text(y)',
+            "          print('TEST5 connection stability applied')",
+            '          P2']
+          patch='\n'.join(lines)+'\n'
+          anchor='      - name: Build RTL8821CE rtw88.kext 8.5.8 MGMT5G TEST5 Connect Stable\n'
+          assert anchor in s
+          s=s.replace(anchor,patch+'\n'+anchor,1)
+          s=s.replace('for (int i = 0; i < 60; i++) {','for (int i = 0; i < 180; i++) {',1)
+          s=s.replace('if (stateNow == 0 && i > 12) break;','if (stateNow == 0 && i > 120) break;',1)
+          o.write_text(s)
+          assert 'v1.9.3 Connect Stable' in s
+          assert 'MGMT5G-TEST5-CONNECT-STABLE-RXTAG' in s
+          PY
+
+      - name: Commit TEST5 workflow
+        shell: bash
+        run: |
+          git config user.name "CHV Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .github/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml
+          git commit -m "build: add CHV WiFi v1.9.3 Connect Stable" || true
+          git push origin HEAD:main
+
+      - name: Dispatch TEST5 build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          api="https://api.github.com/repos/${{ github.repository }}/actions/workflows/build-chv-wifi-dmg-v1.9.3-connect-stable.yml/dispatches"
+          for i in $(seq 1 15); do
+            code=$(curl -sS -o /tmp/r -w "%{http_code}" -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" "$api" -d '{"ref":"main"}')
+            [ "$code" = "204" ] && exit 0
+            cat /tmp/r || true
+            sleep 2
+          done
+          exit 1
