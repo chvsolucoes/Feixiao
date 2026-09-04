@@ -1,6 +1,10 @@
 name: Update CHV Remote Relay
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/update-chv-remote-relay.yml'
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
