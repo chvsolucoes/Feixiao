@@ -1,0 +1,37 @@
+name: Deploy CHV Invest Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/chv-invest/**'
+      - '.github/workflows/deploy-chv-invest-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload CHV Invest
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/chv-invest
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
